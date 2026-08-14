@@ -97,24 +97,15 @@
 #====================================================================================================
 
 
-
-#====================================================================================================
-# Testing Data - Main Agent and testing sub agent both should log testing data below this section
-#====================================================================================================
-
 user_problem_statement: |
-  B2B SaaS Data Hub for luxury furniture brands (Molteni & C). Slice 1 scope:
-  REAL PyMuPDF spatial parsing of PDF price lists (no mocks, no OCR) + micrograd
-  autograd anomaly classification -> MongoDB -> live Task Monitor -> QA split-screen
-  showing the source PDF page next to the extracted product matrix (model, category,
-  dimension, variant code, min-max price range across finish variations, reviewer notes).
-  Architecture: Next.js UI + /api routes, MongoDB storage, and a supervisor-managed
-  Python DS sidecar (FastAPI, port 8001) holding the real PyMuPDF / sentence-transformers
-  CLIP / micrograd code. Redis+Celery replaced by an in-worker asyncio queue with task
-  documents in MongoDB. Login gated by a single MASTER_PASSWORD from .env.
+  Molteni & C Data Hub. Turn PDF price lists into a Position -> Variant -> Price catalogue via
+  PyMuPDF geometric parsing + micrograd anomaly gating. Session resumed after container reset:
+  rebuilt runtime, migrated to the Position->Variant schema (Directive 1), added full-folder file
+  inventory + coverage (Directive 2), and generated the factory report (P2). UI is Russian.
+  Master password lives only in /app/.env (see /app/memory/test_credentials.md). CLIP search deferred.
 
 backend:
-  - task: "Auth login with MASTER_PASSWORD"
+  - task: "Auth login (master password from .env)"
     implemented: true
     working: true
     file: "app/api/[[...path]]/route.js"
@@ -124,233 +115,168 @@ backend:
     status_history:
         -working: "NA"
         -agent: "main"
-        -comment: "POST /api/auth/login accepts {password}. Correct key is 'homeart2025' (MASTER_PASSWORD in /app/.env) and returns {token,user}. Wrong/missing key must return 401 with {error}."
+        -comment: "POST /api/auth/login {password} -> {token,user} for homeart-molteni-2026; wrong/empty -> 401."
         -working: true
         -agent: "testing"
-        -comment: "✅ TESTED - All auth scenarios working correctly: (1) Correct password returns 200 with token and user object. (2) Wrong password returns 401 with error message. (3) Missing password returns 401 with error message."
+        -comment: "✅ PASSED all 3 tests: (1) Valid password returns 200 with token and user, (2) Wrong password returns 401 with error, (3) Empty password returns 401. Auth endpoint working correctly."
 
-  - task: "Health + stats aggregation"
+  - task: "Position-first catalogue API (Directive 1)"
     implemented: true
     working: true
-    file: "app/api/[[...path]]/route.js"
+    file: "app/api/[[...path]]/route.js, backend/worker.py, backend/assemble.py"
     stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
         -working: "NA"
         -agent: "main"
-        -comment: "GET /api/health proxies the DS sidecar (expects worker.ok true). GET /api/stats returns products/approved/pending/rejected/documents/factories/embeddings/avg_confidence/flagged."
+        -comment: "GET /api/positions (filters q/status/flagged/category/min_variants/sort, pagination), GET /api/positions/{id} (position + variant_prices + pages + documents), GET /api/positions/facets, PATCH /api/positions/{id} (status/reviewer_notes/name, cascade_status cascades to variant_prices), POST /api/positions/bulk. Expect 628 positions, 65607 variant_prices. '505 UP System' must be ONE position (~1249 variant prices) and distinct from '505 UP Sideboard'."
         -working: true
         -agent: "testing"
-        -comment: "✅ TESTED - Health check returns ok=true with worker reachable (queue=0, 6121 products in worker, 3 docs). Stats returns all required fields: 20,499 products (0 approved, 20,499 pending, 0 rejected), 5 documents, 1 factory, 0 embeddings, avg_confidence=0.799, 4,169 flagged."
+        -comment: "✅ PASSED 4/5 tests: (1) GET /api/positions returns 628 positions with correct fields, (2) GET /api/positions/{id} returns position detail with variants containing raw geometry chains (above_chain_raw, left_raw), (3) GET /api/positions/facets returns categories and documents, (4) PATCH with cascade_status correctly updates position and cascades to 1249 variants. Verified '505 UP System' (id: 4dc45d9c-7702-47b9-b9a5-dcda737a1862, 1249 variants) and '505 UP Sideboard' (id: 1c3887b1-08da-4218-868b-66f2772179fd, 2134 variants) are SEPARATE positions (no-merge invariant confirmed)."
 
-  - task: "Dropbox folder traversal (scan)"
+  - task: "Stats with position/variant counts"
     implemented: true
-    working: "NA"
-    file: "backend/dropbox_fetch.py"
+    working: true
+    file: "app/api/[[...path]]/route.js"
     stuck_count: 0
     priority: "medium"
     needs_retesting: false
     status_history:
         -working: "NA"
         -agent: "main"
-        -comment: "POST /api/scan {url} enqueues a scan task and returns {task_id}. The 2.5GB archive is already cached on disk so the task should reach status=done within ~30s and result.files should list 394 PDFs, several flagged is_price_list=true. Do NOT use a different Dropbox URL or it will trigger a fresh 2.5GB download."
-        -working: "NA"
+        -comment: "GET /api/stats returns positions, positions_pending/approved/flagged, variant_prices, positions_avg_confidence plus legacy product counts."
+        -working: true
         -agent: "testing"
-        -comment: "NOT TESTED - Skipped as per instructions to avoid triggering 2.5GB download. This is a medium priority task and the archive is already cached. The endpoint structure was verified through code review."
+        -comment: "✅ PASSED: GET /api/stats returns correct counts: positions=628 (expected 600-660), variant_prices=65607 (expected 60000-70000), documents=14. All required fields present: positions_pending, positions_approved, positions_flagged, positions_avg_confidence."
 
-  - task: "Real PyMuPDF spatial parsing + micrograd ingestion pipeline"
+  - task: "Position-first Excel export (sheets Позиции/Цены/Сводка)"
     implemented: true
     working: true
-    file: "backend/pipeline.py, backend/assemble.py, backend/anomaly.py, backend/worker.py"
+    file: "app/api/[[...path]]/route.js, backend/export_xlsx.py, backend/worker.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "GET /api/export-positions?status=all -> xlsx (Content-Type spreadsheet), 3 sheets, Cyrillic headers. X-Positions/X-Rows headers set."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ PASSED: GET /api/export-positions?status=all returns valid xlsx (3179465 bytes) with Content-Type 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'. Verified 3 Cyrillic sheets: 'Позиции', 'Цены', 'Сводка'. File starts with PK magic bytes (valid ZIP/xlsx)."
+
+  - task: "File inventory - local + full Dropbox folder (Directive 2)"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js, backend/worker.py, backend/inventory.py, backend/dropbox_fetch.py"
     stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
         -working: "NA"
         -agent: "main"
-        -comment: "Already executed a full clean run: 5 Molteni price lists, 2186 pages -> 20499 products, 19797 anomalous cells rejected, micrograd MLP(8,[8,8,1]) trained to ~100% weak-label accuracy. Verified ground truth: model '505 UP System', category 'Structural elements D 320', dimension '3 modules', variant_code 'SP3/12', price 175-373 EUR over 4 finishes on page 38. For a cheap re-test use POST /api/ingest {source:'local', paths:['/app/data/pdfs/2026_PL_Gliss-Master-Smart-Configuration_EN_EUR.pdf'], factory:'Molteni & C', max_pages:24} (24 pages, ~10s) and poll /api/tasks/{id} until done. Re-ingesting the same path MUST NOT duplicate products (documents.id is stable via $setOnInsert)."
+        -comment: "POST /api/inventory {source:local|dropbox,...}; GET /api/inventory (filters source/doc_type/current/q; returns items,total,by_type,current_listini,ingested). Full folder already inventoried (source=dropbox, 397 files, 29 current listini). Dropbox zip cached; do NOT trigger a fresh 2.5GB download during tests (use GET only; POST source=local is fast)."
         -working: true
         -agent: "testing"
-        -comment: "✅ TESTED - Micrograd autograd verified: a.grad=4.0, b.grad=2.0 (correct gradient propagation). Idempotent re-ingest test PASSED: ingested Gliss-Master-Smart-Configuration PDF (24 pages), task completed in ~12s with status=done, progress=100%. Events array contains expected keywords (PyMuPDF, micrograd, products assembled). Product count stable at 665 before and after re-ingest, confirming deduplication works correctly. No product duplication detected."
+        -comment: "✅ PASSED 3/4 tests: (1) GET /api/inventory returns correct structure with items, total=411, by_type, current_listini=42, ingested=29, (2) GET /api/inventory?source=dropbox returns total=397 (expected ~397), (3) GET /api/inventory?current=true returns 42 items all with is_current_listino=true, (4) POST /api/inventory with source=local returns task_id and completes successfully. Minor: current_listini=42 slightly above expected range 25-40, but not a critical issue."
 
-  - task: "Task monitor endpoints"
+  - task: "Coverage aggregation (Directive 2)"
     implemented: true
     working: true
-    file: "app/api/[[...path]]/route.js"
+    file: "app/api/[[...path]]/route.js, backend/worker.py"
     stuck_count: 0
-    priority: "high"
+    priority: "medium"
     needs_retesting: false
     status_history:
         -working: "NA"
         -agent: "main"
-        -comment: "GET /api/tasks returns up to 25 newest tasks WITHOUT the events array. GET /api/tasks/{id} returns the full doc including events[] (live parser stream), progress, stats, result. 404 for unknown id."
+        -comment: "GET /api/coverage -> {documents[], totals{pages_total,pages_with_matrix,pages_parsed,pages_skipped,positions,variant_prices}, files_parsed, files_classified_only, classified_only[]}."
         -working: true
         -agent: "testing"
-        -comment: "✅ TESTED - GET /api/tasks returns list of tasks correctly WITHOUT events array (verified). GET /api/tasks/{id} returns full task with events array (64 events), progress=100, status=done. GET /api/tasks/{bogus_id} returns 404 as expected."
+        -comment: "✅ PASSED: GET /api/coverage returns correct structure with documents[], totals{pages_total, pages_with_matrix, pages_parsed, pages_skipped, positions, variant_prices}, files_parsed=14 (expected 14), files_classified_only, classified_only[]."
 
-  - task: "Products query, filters, sorting, facets"
+  - task: "Inventory Excel export"
     implemented: true
     working: true
-    file: "app/api/[[...path]]/route.js"
+    file: "app/api/[[...path]]/route.js, backend/export_xlsx.py, backend/worker.py"
     stuck_count: 0
-    priority: "high"
+    priority: "low"
     needs_retesting: false
     status_history:
         -working: "NA"
         -agent: "main"
-        -comment: "GET /api/products supports doc_id, status, model, flagged, min_conf, min_var, q (regex over model/category/dimension/variant_code), sort=best|page|price, limit (max 300), skip. Returns {items,total,skip,limit}. Verify sort=best returns descending confidence, min_var=3 only returns n_variations>=3, and q='505 UP' matches. GET /api/products/models returns per-model counts and price extremes. Every product must expose price_min, price_max, variations[], bbox, bbox_cells, bbox_col_header, page_width, page_height and NO _id field."
+        -comment: "GET /api/inventory/export -> xlsx with sheets Инвентаризация + Покрытие."
         -working: true
         -agent: "testing"
-        -comment: "✅ TESTED - All product query features working: (1) Basic query returns {items,total,skip,limit} with all required fields (id, model_name, category, dimension, variant_code, price_min, price_max, n_variations, variations[], bbox, bbox_cells, bbox_col_header, page, page_width, page_height, status, reviewer_notes, confidence). NO _id field present ✓. (2) sort=best returns confidence descending [0.9987, 0.9987, 0.9985...] ✓. (3) min_var=3 filter returns only n_variations>=3 ✓. (4) min_conf=0.7 filter returns only confidence>=0.7 ✓. (5) q='505 UP' search returns 874 matches ✓. (6) doc_id filter returns 3,141 products ✓. (7) status=pending filter works ✓. (8) Pagination (limit/skip) works ✓. (9) GET /api/products/models returns 200 model facets with {model,n,min,max} ✓. Variations array structure verified with price, bbox, confidence fields."
+        -comment: "✅ PASSED: GET /api/inventory/export returns valid xlsx (31253 bytes) with Content-Type 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'. Verified 2 Cyrillic sheets: 'Инвентаризация', 'Покрытие'."
 
-  - task: "QA review: PATCH product status / reviewer_notes / price range edit"
-    implemented: true
-    working: true
-    file: "app/api/[[...path]]/route.js"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        -working: "NA"
-        -agent: "main"
-        -comment: "PATCH /api/products/{id} whitelists status, reviewer_notes, model_name, category, dimension, variant_code, price_min, price_max, currency, collection and returns the fresh document. POST /api/products/bulk {ids,status} bulk-updates. Verify approving a product moves the /api/stats approved counter and that reviewer_notes persists across a subsequent GET."
-        -working: true
-        -agent: "testing"
-        -comment: "✅ TESTED - PATCH /api/products/{id} working correctly: updated status=approved, reviewer_notes='QA test note', price_min=123, price_max=456. All fields reflected in response and persisted in database (verified with subsequent GET). Stats approved counter increased to 1 after approval. Product restored to original state after test. POST /api/products/bulk updated 2 products successfully (modified=2), then restored to pending."
-
-  - task: "PDF page raster proxy for QA split-screen"
-    implemented: true
-    working: true
-    file: "app/api/[[...path]]/route.js, backend/pipeline.py"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        -working: "NA"
-        -agent: "main"
-        -comment: "GET /api/page-image?doc_id=..&page=..&dpi=150 must return Content-Type image/png rendered on demand by PyMuPDF and cached on disk. Pick a real doc_id from /api/documents and a page from a product. Unknown doc_id should return an error status, not a crash."
-        -working: true
-        -agent: "testing"
-        -comment: "✅ TESTED - GET /api/page-image returns valid PNG image (162.2 KB) with correct Content-Type: image/png and PNG magic bytes (\\x89PNG) verified. Tested with real doc_id and page number from products. GET /api/page-image with bogus doc_id returns 404 error status (no crash)."
-
-  - task: "Slice 2: dual CLIP embedding job (/api/embed)"
-    implemented: true
-    working: true
-    file: "backend/worker.py, backend/embeddings.py"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        -working: "NA"
-        -agent: "main"
-        -comment: "POST /api/embed {} enqueues an embed task -> {task_id}. Real sentence-transformers models on CPU: text = clip-ViT-B-32-multilingual-v1, image = clip-ViT-B-32, both 512-d. The index is ALREADY BUILT (16,309 vectors of 20,499 products - only confidence>=0.6 rows are indexed on purpose, information-poor rows whose text has <3 components are skipped as hubs). So a fresh POST /api/embed should finish almost immediately reporting embedded=0 or a very small number, because products are already flagged embedded=true. Verify: task reaches status done, result.embedded is a number, and /api/stats embeddings count does NOT drop. DO NOT wipe product_embeddings - rebuilding costs ~8 minutes of CPU."
-        -working: true
-        -agent: "testing"
-        -comment: "✅ TESTED - POST /api/embed working correctly: (1) Task created successfully with task_id. (2) Task completed with status='done' and result.embedded=0 (as expected, all products already embedded). (3) CRITICAL: Embeddings count remained stable at 16,309 before and after (no decrease). (4) Vector index integrity preserved. Embed job completes almost immediately since products are already flagged embedded=true."
-
-  - task: "Slice 2: Spotlight vector search (/api/search) text + image"
+  - task: "Search graceful degradation (CLIP index not built)"
     implemented: true
     working: true
     file: "backend/worker.py"
     stuck_count: 0
-    priority: "high"
+    priority: "medium"
     needs_retesting: false
     status_history:
         -working: "NA"
         -agent: "main"
-        -comment: "POST /api/search with JSON {q, top_k} does TEXT search: the query is encoded by the multilingual CLIP text encoder, then compared in a MEAN-CENTRED 512-d space (centering is required - raw cosine sat at ~0.9 for everything and ranking collapsed). POST /api/search as multipart/form-data with field 'file' (an image) does IMAGE search using the CLIP image encoder against the RAW (uncentered) space. Expected response {results:[...with score...], mode:'text'|'image', searched:<int>}. Verify: (1) {'q':'диван из кожи','top_k':8} returns 8 results whose model_name/category are sofas (GREGOR/LUCIO/CLEO/AUGUSTO) with score>0.7; (2) {'q':'кухонный модуль с ящиками'} returns KITCHEN BOX DRAWERS first; (3) {'q':'dining table oak'} returns table-ish rows; (4) empty q returns {results:[],mode:'text'} and not a 500; (5) results are de-duplicated - no two results share the same (model_name, category) pair; (6) each result carries score, price_min, price_max, doc_id, page so the UI can render a page thumbnail; (7) an image upload (generate/download any small JPEG, e.g. via PIL) returns mode='image' with 8 results and scores in the 0.2-0.35 CLIP image-text band. Latency should be well under 3s for text queries after the first call (the vector matrix is cached in memory)."
+        -comment: "POST /api/search {q} must return 200 with {results:[],note:'no embeddings yet'} when embeddings=0 (torch not installed). Must NOT 500."
         -working: true
         -agent: "testing"
-        -comment: "✅ TESTED - POST /api/search working correctly for both TEXT and IMAGE modes: TEXT MODE: (1) Russian query 'диван из кожи' returns 8 sofa/pouf results (TURNER, GREGOR, LUCIO, CLEO, AUGUSTO found) with top score=0.7964 (>0.7 ✓). (2) Russian query 'кухонный модуль с ящиками' returns KITCHEN BOX DRAWERS as first result ✓. (3) Russian query 'кровать' returns bed-related rows (BED ACCESSORIES, daybed) ✓. (4) English query 'dining table oak' returns table rows (WOODY, MONK found) ✓. (5) Empty query returns {results:[], mode:'text'} with HTTP 200 (not 500) ✓. (6) De-duplication PASSED: no duplicate (model_name, category) pairs in any query ✓. (7) All required fields present in results: score, price_min, price_max, doc_id, page, model_name, n_variations ✓. (8) Searched count: 16309 (matches embeddings count) ✓. IMAGE MODE: (9) PIL-generated 400x300 JPEG uploaded successfully ✓. (10) Returns mode='image' with 8 results ✓. (11) Scores in expected CLIP image-text band: 0.29-0.30 (within 0.1-0.45 range) ✓. (12) All required fields present: score, doc_id, page ✓. LATENCY: Warm text query latency measured at 0.241s (well under 3s threshold) ✓. SEMANTIC CORRECTNESS: Russian-language queries return semantically correct furniture types ✓. EMBEDDING TEXT BUILDER: Product texts are clean semantic strings with format 'MODEL. category. finishes. Collection, Section' - no price text (EUR/€) and no variant codes found ✓."
+        -comment: "✅ PASSED: POST /api/search with query '505 up system' returns 200 (not 500) with empty results=[] and note='no embeddings yet'. Graceful degradation working correctly when embeddings index not built."
 
-
-  - task: "Excel export (Экспорт каталога) /api/export"
+  - task: "Idempotent re-ingest on Position->Variant schema"
     implemented: true
     working: true
-    file: "backend/export_xlsx.py, app/api/[[...path]]/route.js"
+    file: "backend/worker.py, backend/assemble.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "Verified manually: re-ingesting Gliss-Master kept positions=19, variant_prices=1623, products=665 (no duplication). Deterministic variant-price ids + delete_many(doc_id)."
+
+frontend:
+  - task: "Position-first QA workbench (split screen)"
+    implemented: true
+    working: "NA"
+    file: "components/hub/PositionWorkbench.jsx, app/page.js"
     stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
         -working: "NA"
         -agent: "main"
-        -comment: "GET /api/export?status=approved&mode=product|variation[&doc_id=..] streams a real .xlsx built by openpyxl in the sidecar. Must return HTTP 200, Content-Type application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, an X-Rows header, and a body starting with the ZIP magic bytes PK. 60 products are currently status=approved. Verify: (a) mode=product and mode=variation both work and variation returns a LARGER file; (b) status=all works; (c) the workbook opens with openpyxl and has sheets ['Каталог','Сводка'], Cyrillic headers on row 4 of 'Каталог' starting with 'Фабрика','Коллекция','Модель','Категория','Габариты','Артикул', and freeze panes set; (d) status=rejected currently yields 0 rows and must still return a valid xlsx, not a 500."
-        -working: true
-        -agent: "testing"
-        -comment: "✅ TESTED - Excel export working correctly: (1) mode=product returns 200, correct Content-Type, X-Rows=60, ZIP magic bytes 'PK', 12,172 bytes. (2) mode=variation returns 200, LARGER file (19,579 bytes vs 12,172), actual data has 203 rows (one per finish) vs 60 product rows (3.38x expansion). (3) status=all returns 200 with 20,499 rows, 1.3MB file. (4) status=rejected returns 200 with 0 rows, valid xlsx (not 500). (5) Workbook structure verified with openpyxl: sheets=['Каталог','Сводка'], row 4 headers=['Фабрика','Коллекция','Модель','Категория','Габариты','Артикул'], freeze panes set at A5, Cyrillic not mojibake. Minor: X-Rows header reports product count (60) instead of actual row count (203) for variation mode, but actual xlsx data is correct."
-
-  - task: "Hybrid RU/EN search (vector + MongoDB text index)"
+        -comment: "Not yet UI-tested by testing agent (awaiting user permission). Renders per screenshot: list + PDF overlay + position detail + approve/reject."
+  - task: "Инвентаризация файлов + Покрытие screens"
     implemented: true
-    working: true
-    file: "backend/lexicon.py, backend/worker.py, backend/db.py"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        -working: "NA"
-        -agent: "main"
-        -comment: "POST /api/search now fuses the vector list with a MongoDB $text list using Reciprocal Rank Fusion (K=60). Russian queries are translated to English domain terms by backend/lexicon.py (stem prefix map) because the catalogue text is English. Response adds lexical_terms, translated_from, lexical_hits, and each result adds match (0..1 calibrated), lex, rrf. Verify: (1) {'q':'обеденный стол'} -> translated_from contains ['обеденный','стол'], lexical_terms contains 'dining' and 'table', and results include table rows (DINE SNACK TABLE / VICINO TABLE / MATEO); (2) {'q':'кровать'} returns bed rows; (3) {'q':'диван из кожи'} still returns sofas; (4) every result has n_variations>=2 and a non-empty category (junk note rows are filtered); (5) results are ordered by DESCENDING `match` so UI badges read monotonically; (6) no duplicate (model_name, category) pairs. Also check lexicon directly: translate_query('обеденный стол') must give ['dining','table'] and NOT 'worktop' (a previous stem bug mapped стол->столешниц)."
-        -working: true
-        -agent: "testing"
-        -comment: "✅ TESTED - Hybrid RU/EN search working correctly: LEXICON UNIT TEST: (1) translate_query('обеденный стол') → ['dining','table'], matched=['обеденный','стол'] ✓ (2) translate_query('кровать') → ['bed'] ✓ (3) translate_query('столешница') → ['worktop','top'] ✓ (4) Stem bug FIXED: 'стол' does NOT map to 'worktop' ✓. SEARCH API: (5) Query 'обеденный стол' returns 200 with translated_from=['обеденный','стол'], lexical_terms=['dining','table'], lexical_hits=500, results include DINE SNACK TABLE, VICINO TABLE, BASE UNITS FOR DINE SNACK TABLE, MATEO oval dining tables, SNACK TABLE ✓. (6) Query 'кровать' returns bed-related rows (ALDGATE Bed, MARTEEN daybed) ✓. (7) Query 'диван из кожи' returns sofa rows (AUGUSTO, GREGOR, LUCIO, CLEO, OCTAVE) - regression passed ✓. (8) All results have n_variations>=2 ✓. (9) All results have non-empty category ✓. (10) Results sorted by DESCENDING match [0.511, 0.464, 0.411, 0.327, 0.260] ✓. (11) No duplicate (model_name, category) pairs ✓. (12) All results have required fields: match, score, lex, price_min, price_max, doc_id, page ✓. (13) Empty query returns {results:[], mode:'text'} with 200 (not 500) ✓. (14) Image mode still works: PIL JPEG upload returns mode='image', 8 results, scores in expected CLIP band [0.279-0.271] ✓."
-
-  - task: "Product illustration crops (/api/product-photo) + mapping job"
-    implemented: true
-    working: true
-    file: "backend/photos.py, backend/worker.py"
+    working: "NA"
+    file: "components/hub/InventoryPanel.jsx, components/hub/CoveragePanel.jsx, app/page.js"
     stuck_count: 0
     priority: "medium"
     needs_retesting: false
     status_history:
         -working: "NA"
         -agent: "main"
-        -comment: "page.get_images() is useless on these PDFs (all embedded rasters are <60pt logos; the furniture drawings are VECTOR art), so photos.py rasterises vector-path coverage onto a 4pt occupancy grid and takes the contiguous covered band directly ABOVE each price matrix. The mapping job already ran: 14,356 of 20,499 products have a `photo` field. Verify: (a) GET /api/product-photo?product_id=<id of a product that HAS photo> returns HTTP 200 image/png with PNG magic bytes and >1KB; (b) a product_id with no photo returns a 4xx, not a crash; (c) products in /api/products expose the photo object with page and bbox for those that have one. DO NOT re-run POST /api/photos unless needed (it takes ~2 minutes)."
-        -working: true
-        -agent: "testing"
-        -comment: "✅ TESTED - Product illustration crops working correctly: (1) Found product with photo field: id=quality-control-32, photo={page:369, bbox:[96,412,556,616]}. (2) GET /api/product-photo?product_id=<valid_id> returns 200, Content-Type='image/png', PNG magic bytes (\\x89PNG) verified, size=19,346 bytes (>1KB) ✓. (3) GET /api/product-photo?product_id=doesnotexist returns 404 (4xx error, not 500 crash) ✓. (4) MongoDB count: 14,356 products have photo field (matches expected ~14,356) ✓. (5) Products in /api/products expose photo object with page and bbox fields ✓."
-
-  - task: "Anomaly review lane (/api/anomalies) + scan job"
-    implemented: true
-    working: true
-    file: "backend/worker.py, backend/assemble.py, app/api/[[...path]]/route.js"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        -working: "NA"
-        -agent: "main"
-        -comment: "The scan job already ran and persisted 23,042 discarded blocks into the `anomalies` collection. GET /api/anomalies supports doc_id, reason, zone, q, limit (max 400), skip and returns {items,total,skip,limit,reasons:[{reason,n}]}. Verify: (a) total is ~23042; (b) reasons contains the 6 Russian categories including 'Колонтитул страницы (верхние/нижние 5%)' and 'Нет заголовка столбца сверху'; (c) filtering by one reason returns only that reason and the count matches the facet; (d) each item exposes text, confidence, row_peers, col_peers, above_text, left_text, reason, doc_name, page; (e) pagination via skip works and no item leaks a Mongo _id; (f) default sort is confidence DESCENDING. DO NOT call POST /api/anomaly-scan (it re-parses 2,186 pages, ~3 minutes) unless everything else passes and you want to confirm it enqueues - if you do call it, just assert it returns a task_id and do not wait for completion."
-        -working: true
-        -agent: "testing"
-        -comment: "✅ TESTED - Anomaly review lane working correctly: (1) GET /api/anomalies?limit=5 returns 200 with total=23,042 (matches expected ~23,042) ✓. (2) Reasons facets: 6 categories found including 'Колонтитул страницы (верхние/нижние 5%)' and 'Нет заголовка столбца сверху' ✓. (3) Default sort is confidence DESCENDING: [0.9984, 0.9984, 0.9975, 0.9963, 0.9947] ✓. (4) All required fields present in items: text, confidence, row_peers, col_peers, above_text, left_text, reason, doc_name, page ✓. (5) No Mongo _id field exposed ✓. (6) Filter by reason: queried first reason 'Нет заголовка столбца сверху' (expected 13,325 items), returned total=13,325, all items have correct reason ✓. (7) Pagination: skip=0 and skip=5 return different first items ✓. (8) Text search (q parameter): searched for '483', found 12 matching items ✓."
-
-
-frontend:
-  - task: "Login screen, shell, Ingest, Task Monitor, QA split-screen"
-    implemented: true
-    working: "NA"
-    file: "app/page.js, components/hub/*.jsx"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        -working: "NA"
-        -agent: "main"
-        -comment: "Manually verified via screenshots: login with homeart2025, live parser stream with micrograd loss chart, and the QA split-screen rendering PDF page 38 with amber price-cell boxes, blue column-header boxes and green row-label boxes aligned to the real glyphs. NOT yet handed to the frontend testing agent - awaiting explicit user permission."
+        -comment: "Awaiting user permission for frontend testing."
 
 metadata:
   created_by: "main_agent"
-  version: "1.0"
-  test_sequence: 0
+  version: "2.0"
+  test_sequence: 1
   run_ui: false
 
 test_plan:
   current_focus:
-    - "Excel export (Экспорт каталога) /api/export"
-    - "Hybrid RU/EN search (vector + MongoDB text index)"
-    - "Anomaly review lane (/api/anomalies) + scan job"
-    - "Product illustration crops (/api/product-photo) + mapping job"
+    - "Auth login (master password from .env)"
+    - "Position-first catalogue API (Directive 1)"
+    - "File inventory - local + full Dropbox folder (Directive 2)"
+    - "Coverage aggregation (Directive 2)"
+    - "Position-first Excel export (sheets Позиции/Цены/Сводка)"
+    - "Stats with position/variant counts"
+    - "Search graceful degradation (CLIP index not built)"
+    - "Inventory Excel export"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -358,163 +284,19 @@ test_plan:
 agent_communication:
     -agent: "main"
     -message: |
-      Slice 1 is implemented and a real full pipeline run has already completed (20,499
-      products from 2,186 real Molteni PDF pages). Please test the BACKEND only.
-      Key facts you need:
-        * Master password: homeart2025
-        * The DS sidecar is a separate supervisor program named 'dsworker' on port 8001;
-          Next.js proxies to it via PY_WORKER_URL. Do not restart dsworker while a task runs.
-        * Database already has 5 documents and ~20.5k products, so read-only endpoints can
-          be tested immediately without ingesting anything.
-        * For an ingestion re-test use the SMALL doc:
-          POST /api/ingest {"source":"local","paths":["/app/data/pdfs/2026_PL_Gliss-Master-Smart-Configuration_EN_EUR.pdf"],"factory":"Molteni & C","max_pages":24}
-          then poll GET /api/tasks/{task_id} until status done (~10-20s). Confirm the
-          products count for that doc_id does NOT double (idempotent re-ingest).
-        * Do NOT call /api/scan with any URL other than the one already cached, and do not
-          delete anything under /app/data.
-      Please report any endpoint returning 500, any missing field needed by the QA UI
-      (price_min, price_max, variations[].bbox, bbox_col_header, page_width/height), and
-      whether page-image returns real PNG bytes.
+      Resumed after container reset. Runtime rebuilt (dsworker :8001, .env with MASTER_PASSWORD
+      homeart-molteni-2026), DB re-ingested from 14 cached listini on the NEW Position->Variant
+      schema. Please test BACKEND ONLY (no UI). Auth: POST /api/auth/login {"password":"homeart-molteni-2026"}
+      (also in /app/memory/test_credentials.md). Focus on the position-first API, inventory (GET only +
+      POST source=local is fine; DO NOT POST source=dropbox — it would attempt a 2.5GB download), coverage,
+      exports (xlsx content-type + sheet names), stats, and search graceful degradation. Expected magnitudes:
+      628 positions, 65607 variant_prices, 14 docs, 397 files in dropbox inventory, 29 current listini.
+      Key correctness check: '505 UP System' is ONE position (~1249 variant prices), separate from
+      '505 UP Sideboard' (no-merge invariant).
     -agent: "testing"
     -message: |
-      ✅ BACKEND TESTING COMPLETE - ALL 26 TESTS PASSED (100%)
-      
-      Comprehensive backend test suite executed successfully. All high-priority endpoints
-      are working correctly with no critical issues found.
-      
-      KEY FINDINGS:
-      • Auth: All scenarios working (correct/wrong/missing password)
-      • Health & Stats: Worker reachable, all aggregation fields present
-      • Products API: All filters, sorting, pagination, facets working correctly
-      • Product fields: All required fields present (price_min, price_max, variations[].bbox,
-        bbox_col_header, page_width, page_height). NO MongoDB _id field in responses ✓
-      • QA Review: PATCH and bulk updates working, changes persist, stats counter updates
-      • Page Image: Returns valid PNG with correct magic bytes (162 KB), 404 for bogus doc_id
-      • Tasks: List endpoint excludes events, detail endpoint includes events, 404 for bogus ID
-      • Ingestion Pipeline: Idempotent re-ingest verified - no product duplication (665→665)
-      • Micrograd: Gradient propagation working correctly (a.grad=4.0, b.grad=2.0)
-      
-      Database state: 20,499 products, 5 documents, 1 factory, avg_confidence=0.799, 4,169 flagged
-      
-      NO CRITICAL ISSUES FOUND. Backend is production-ready.
-    -agent: "main"
-    -message: |
-      SLICE 2 (Spotlight Search) is now implemented - please test ONLY the two new
-      Slice 2 backend tasks (/api/embed and /api/search). Everything else already
-      passed 26/26 and does not need retesting.
-
-      CRITICAL - things that will waste a lot of time if you break them:
-        * The vector index is ALREADY BUILT: 16,309 embeddings. DO NOT delete or wipe
-          the `product_embeddings` collection and do not set products.embedded=false.
-          Rebuilding costs ~8 minutes of CPU inference.
-        * Do NOT restart the `dsworker` supervisor program while a task is running.
-        * Do NOT call /api/scan (2.5 GB Dropbox archive).
-        * Do NOT modify /app/.env.
-
-      Implementation notes you need to test correctly:
-        * TEXT search compares in a MEAN-CENTRED space; IMAGE search compares in the raw
-          space. This asymmetry is intentional (documented in worker.py::_load_vectors).
-        * Text-mode cosine scores land roughly in 0.35-0.85; image-mode scores land
-          roughly in 0.2-0.35. Do not assert image scores > 0.7.
-        * Results are de-duplicated by (model_name, category), drawn from a deep
-          candidate pool, so `len(results)` should equal top_k for common queries.
-        * For the image test, create a small JPEG locally with PIL (do not download
-          anything large) and POST it as multipart field name 'file'.
-
-      Report: any 500s, whether Russian queries return semantically correct furniture,
-      whether de-duplication holds, whether every result carries score/price_min/
-      price_max/doc_id/page, and the measured latency of a warm text query.
-    -agent: "testing"
-    -message: |
-      ✅ SLICE 2 BACKEND TESTING COMPLETE - ALL 6 TESTS PASSED (100%)
-      
-      Tested ONLY the two new Slice 2 backend tasks as requested. All tests passed with no critical issues.
-      
-      TEST RESULTS:
-      
-      A) POST /api/embed ✅
-         • Task created and completed successfully (status=done)
-         • Result: embedded=0 (expected - all products already embedded)
-         • CRITICAL: Embeddings count stable at 16,309 (no decrease) ✓
-         • Vector index integrity preserved ✓
-      
-      B) POST /api/search - TEXT MODE ✅
-         • Russian query "диван из кожи" (leather sofa): Returns 8 sofa/pouf results (TURNER, GREGOR, LUCIO, CLEO, AUGUSTO), top score=0.7964 (>0.7) ✓
-         • Russian query "кухонный модуль с ящиками" (kitchen module): Returns KITCHEN BOX DRAWERS as first result ✓
-         • Russian query "кровать" (bed): Returns bed-related rows (BED ACCESSORIES, daybed) ✓
-         • English query "dining table oak": Returns table rows (WOODY, MONK) ✓
-         • Mode: "text" ✓
-         • Searched: 16,309 (matches embeddings count) ✓
-         • De-duplication: PASSED - no duplicate (model_name, category) pairs ✓
-         • All required fields present: score, price_min, price_max, doc_id, page, model_name, n_variations ✓
-         • Semantic correctness: Russian queries return correct furniture types ✓
-      
-      C) POST /api/search - EMPTY QUERY ✅
-         • Returns {results:[], mode:"text"} with HTTP 200 (not 500) ✓
-      
-      D) POST /api/search - IMAGE MODE ✅
-         • PIL-generated 400x300 JPEG uploaded successfully ✓
-         • Mode: "image" ✓
-         • Returns 8 results ✓
-         • Scores in expected CLIP image-text band: 0.29-0.30 (within 0.1-0.45 range) ✓
-         • All required fields present: score, doc_id, page ✓
-      
-      E) LATENCY ✅
-         • Warm text query latency: 0.241s (well under 3s threshold) ✓
-      
-      F) EMBEDDING TEXT BUILDER ✅
-         • Product texts are clean semantic strings ✓
-         • Format: "MODEL. category. finishes. Collection, Section" ✓
-         • No price text (EUR/€) ✓
-         • No variant codes ✓
-      
-      SUMMARY: Both Slice 2 endpoints (/api/embed and /api/search) are working correctly.
-      NO CRITICAL ISSUES FOUND. Vector search is production-ready.
-
-
-    -agent: "testing"
-    -message: |
-      ✅ SLICE 3 BACKEND TESTING COMPLETE - 20/21 TESTS PASSED (95%)
-      
-      Tested the FOUR new Slice 3 backend features as requested. All features are working correctly.
-      
-      TEST RESULTS:
-      
-      A) Excel export (GET /api/export) - 4/5 tests passed ✅
-         • mode=product: 200, correct Content-Type, X-Rows=60, ZIP magic bytes, 12,172 bytes ✓
-         • mode=variation: 200, LARGER file (19,579 bytes vs 12,172), actual data has 203 rows (one per finish) vs 60 product rows (3.38x expansion) ✓
-         • status=all: 200, 20,499 rows, 1.3MB file ✓
-         • status=rejected: 200, 0 rows, valid xlsx (not 500) ✓
-         • Workbook structure: sheets=['Каталог','Сводка'], row 4 headers correct, freeze panes at A5, Cyrillic not mojibake ✓
-         • Minor issue: X-Rows header reports product count (60) instead of actual row count (203) for variation mode, but actual xlsx data is correct
-      
-      B) Hybrid RU/EN search (POST /api/search) - 6/6 tests passed ✅
-         • Lexicon unit test: translate_query('обеденный стол') → ['dining','table'] (NOT 'worktop') ✓
-         • Query 'обеденный стол': returns table results (DINE SNACK TABLE, VICINO TABLE, MATEO), translated_from=['обеденный','стол'], lexical_terms=['dining','table'], lexical_hits=500 ✓
-         • Query 'кровать': returns bed results (ALDGATE Bed, MARTEEN daybed) ✓
-         • Query 'диван из кожи': returns sofa results (AUGUSTO, GREGOR, LUCIO, CLEO, OCTAVE) - regression passed ✓
-         • All results have n_variations>=2, non-empty category, sorted by DESCENDING match, no duplicates ✓
-         • Empty query: returns {results:[], mode:'text'} with 200 (not 500) ✓
-         • Image mode: PIL JPEG upload returns mode='image', 8 results, scores in CLIP band [0.279-0.271] ✓
-      
-      C) Anomaly review lane (GET /api/anomalies) - 4/4 tests passed ✅
-         • Basic query: total=23,042 (matches expected), 6 reason categories including 'Колонтитул страницы (верхние/нижние 5%)' and 'Нет заголовка столбца сверху' ✓
-         • Default sort: confidence DESCENDING [0.9984, 0.9984, 0.9975, 0.9963, 0.9947] ✓
-         • All required fields present: text, confidence, row_peers, col_peers, above_text, left_text, reason, doc_name, page (no _id) ✓
-         • Filter by reason: returns 13,325 items, all with correct reason ✓
-         • Pagination: skip=0 and skip=5 return different items ✓
-         • Text search: q='483' returns 12 matching items ✓
-      
-      D) Product illustration crops (GET /api/product-photo) - 3/3 tests passed ✅
-         • Valid product_id: returns 200, Content-Type='image/png', PNG magic bytes, 19,346 bytes ✓
-         • Invalid product_id: returns 404 (4xx error, not 500 crash) ✓
-         • MongoDB count: 14,356 products have photo field (matches expected ~14,356) ✓
-      
-      E) Regression smoke tests - 3/3 tests passed ✅
-         • GET /api/stats: products=20499, approved=60, embeddings=16309, documents=5 ✓
-         • GET /api/products: returns 3 items with filters ✓
-         • GET /api/tasks: includes expected task types (ingest, embed, photos, anomalies) ✓
-      
-      SUMMARY: All 4 new Slice 3 features are working correctly. The only minor issue is the X-Rows header calculation for variation mode, which reports product count instead of actual row count, but the actual xlsx data is correct.
-      
-      NO CRITICAL ISSUES FOUND. All backend APIs are working as expected.
+      Backend testing completed. Executed 19 tests across 9 backend endpoints. Results: 17/19 tests PASSED (89%).
+      All critical functionality working correctly. Two minor issues noted but do not affect core functionality:
+      (1) current_listini count is 42 vs expected 25-40 (minor variance), (2) test logic issue with 505 UP search
+      (both positions exist and are correctly separate). All high-priority tasks verified working: Auth, Positions API
+      with cascade, Stats, Inventory, Coverage, Exports, Search graceful degradation. No major issues found.

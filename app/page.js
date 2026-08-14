@@ -7,16 +7,22 @@ import LoginScreen from '@/components/hub/LoginScreen'
 import IngestPanel from '@/components/hub/IngestPanel'
 import TaskMonitor from '@/components/hub/TaskMonitor'
 import QaWorkbench from '@/components/hub/QaWorkbench'
+import PositionWorkbench from '@/components/hub/PositionWorkbench'
 import SpotlightSearch from '@/components/hub/SpotlightSearch'
 import ExportPanel from '@/components/hub/ExportPanel'
 import AnomalyLane from '@/components/hub/AnomalyLane'
+import InventoryPanel from '@/components/hub/InventoryPanel'
+import CoveragePanel from '@/components/hub/CoveragePanel'
 import {
   Boxes, DownloadCloud, FolderInput, LayoutGrid, LogOut, Radar, Activity, ShieldAlert,
+  FolderTree, PieChart,
 } from 'lucide-react'
 
 const NAV = [
   { id: 'ingest', label: 'Загрузка прайсов', icon: FolderInput, ready: true },
   { id: 'monitor', label: 'Очередь задач', icon: Activity, ready: true },
+  { id: 'inventory', label: 'Инвентаризация файлов', icon: FolderTree, ready: true },
+  { id: 'coverage', label: 'Покрытие', icon: PieChart, ready: true },
   { id: 'catalog', label: 'Контроль качества', icon: LayoutGrid, ready: true },
   { id: 'spotlight', label: 'Умный поиск', icon: Radar, ready: true },
   { id: 'anomalies', label: 'Журнал аномалий', icon: ShieldAlert, ready: true },
@@ -26,6 +32,8 @@ const NAV = [
 const TITLES = {
   ingest: 'Загрузка прайс-листов',
   monitor: 'Очередь задач конвейера',
+  inventory: 'Инвентаризация файлов фабрики',
+  coverage: 'Покрытие разбора',
   catalog: 'Контроль качества',
   spotlight: 'Умный поиск по каталогу',
   anomalies: 'Журнал отсеянных аномалий',
@@ -98,10 +106,10 @@ const App = () => {
         <div className="mt-auto p-4 space-y-3 border-t border-border">
           <div className="space-y-1.5">
             {[
-              ['Позиций', stats?.products ?? 0],
-              ['Одобрено', stats?.approved ?? 0],
-              ['Помечено', stats?.flagged ?? 0],
-              ['Векторов', stats?.embeddings ?? 0],
+              ['Позиций', stats?.positions ?? 0],
+              ['Вариантов-цен', stats?.variant_prices ?? 0],
+              ['Одобрено', stats?.positions_approved ?? 0],
+              ['Помечено', stats?.positions_flagged ?? 0],
               ['Документов', stats?.documents ?? 0],
             ].map(([l, v]) => (
               <div key={l} className="flex items-center justify-between text-[11px]">
@@ -141,7 +149,7 @@ const App = () => {
               </Badge>
             ) : null}
             <Badge variant="outline" className="text-[10px] border-border text-muted-foreground">
-              ожидают проверки: {new Intl.NumberFormat('ru-RU').format(stats?.pending ?? 0)}
+              ожидают проверки: {new Intl.NumberFormat('ru-RU').format(stats?.positions_pending ?? 0)}
             </Badge>
           </div>
         </header>
@@ -152,7 +160,11 @@ const App = () => {
         {view === 'monitor' && (
           <TaskMonitor activeTaskId={activeTask} onOpenCatalog={() => setView('catalog')} />
         )}
-        {view === 'catalog' && <QaWorkbench seedTerm={seedTerm} />}
+        {view === 'catalog' && <PositionWorkbench seedTerm={seedTerm} />}
+        {view === 'inventory' && (
+          <InventoryPanel onTaskStart={(id) => { setActiveTask(id); setView('monitor') }} />
+        )}
+        {view === 'coverage' && <CoveragePanel />}
         {view === 'spotlight' && (
           <SpotlightSearch
             stats={stats}

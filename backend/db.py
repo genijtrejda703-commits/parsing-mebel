@@ -30,6 +30,9 @@ factories = db["factories"]
 documents = db["documents"]
 tasks = db["tasks"]
 products = db["products"]
+positions = db["positions"]
+variant_prices = db["variant_prices"]
+file_inventory = db["file_inventory"]
 embeddings_col = db["product_embeddings"]
 anomalies = db["anomalies"]
 
@@ -42,6 +45,19 @@ def ensure_indexes():
         products.create_index([("model_name", 1)])
         products.create_index("page")
         products.create_index("confidence")
+        positions.create_index([("factory_id", 1), ("norm_name", 1)], unique=True)
+        positions.create_index("id", unique=True)
+        positions.create_index("status")
+        positions.create_index("flagged")
+        positions.create_index([("name", 1)])
+        variant_prices.create_index("id", unique=True)
+        variant_prices.create_index("position_id")
+        variant_prices.create_index("doc_id")
+        variant_prices.create_index("norm_name")
+        variant_prices.create_index("page")
+        file_inventory.create_index("id", unique=True)
+        file_inventory.create_index("rel")
+        file_inventory.create_index("doc_type")
         tasks.create_index("created_at")
         documents.create_index("id", unique=True)
         embeddings_col.create_index("product_id")

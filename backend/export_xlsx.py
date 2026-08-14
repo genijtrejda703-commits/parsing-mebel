@@ -150,3 +150,139 @@ def _write_row(ws, r, vals, money_cols, money_fmt):
             cell.number_format = money_fmt
         if fill:
             cell.fill = fill
+
+
+HEAD_POS = ["Фабрика", "Модель", "Категории", "Вариантов", "Цена мин, €",
+            "Цена макс, €", "Валюта", "Точность, %", "Статус", "Документов",
+            "Страниц", "Заметки проверяющего"]
+WIDTHS_POS = [16, 28, 34, 11, 13, 13, 9, 11, 12, 11, 9, 34]
+HEAD_PRICE = ["Фабрика", "Модель", "Артикул", "Габариты", "Отделка", "Цена, €",
+              "Валюта", "Точность, %", "Статус", "Документ", "Стр."]
+WIDTHS_PRICE = [16, 26, 14, 18, 30, 12, 9, 11, 12, 34, 7]
+
+
+def build_position_workbook(positions, variants, meta):
+    """Position-first catalogue: sheets «Позиции», «Цены», «Сводка»."""
+    stamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+    wb = Workbook()
+
+    # ---- Позиции ----
+    ws = wb.active
+    ws.title = "Позиции"
+    _title(ws, f"Позиции — {meta.get('factory') or 'все фабрики'}",
+           f"Статус: {meta.get('status_label')} · позиций: {len(positions)} · "
+           f"вариантов-цен: {len(variants)} · выгрузка: {stamp} · HOMEART Data Hub",
+           len(HEAD_POS))
+    _style_header(ws, HEAD_POS, WIDTHS_POS)
+    r = 5
+    for p in sorted(positions, key=lambda x: (str(x.get("factory") or ""),
+                                              str(x.get("name") or ""))):
+        cats = ", ".join((p.get("categories") or [])[:6])
+        vals = [p.get("factory"), p.get("name"), cats, p.get("n_variants"),
+                p.get("price_min"), p.get("price_max"), p.get("currency") or "EUR",
+                round((p.get("avg_confidence") or 0) * 100, 1),
+                STATUS_RU.get(p.get("status"), p.get("status")),
+                p.get("n_docs"), p.get("n_pages"), p.get("reviewer_notes")]
+        _write_row(ws, r, vals, [5, 6], "#,##0")
+        r += 1
+
+    # ---- Цены ----
+    ws2 = wb.create_sheet("Цены")
+    _title(ws2, "Варианты и цены", f"строк: {len(variants)} · выгрузка: {stamp}",
+           len(HEAD_PRICE))
+    _style_header(ws2, HEAD_PRICE, WIDTHS_PRICE)
+    r = 5
+    for v in sorted(variants, key=lambda x: (str(x.get("position_name") or ""),
+                                             str(x.get("variant_code") or ""),
+                                             str(x.get("finish") or ""))):
+        vals = [v.get("factory"), v.get("position_name"), v.get("variant_code"),
+                v.get("dimension"), v.get("finish"), v.get("price"),
+                v.get("currency") or "EUR",
+                round((v.get("confidence") or 0) * 100, 1),
+                STATUS_RU.get(v.get("status"), v.get("status")),
+                v.get("doc_name"), (v.get("page") or 0) + 1]
+        _write_row(ws2, r, vals, [6], "#,##0")
+        r += 1
+
+    # ---- Сводка ----
+    ws3 = wb.create_sheet("Сводка")
+    _title(ws3, "Сводка по документам", f"выгрузка: {stamp}", 5)
+    _style_header(ws3, ["Документ", "Позиций", "Вариантов-цен",
+                        "Цена мин, €", "Цена макс, €"], [40, 12, 14, 14, 14])
+    by_doc = {}
+    for v in variants:
+        d = by_doc.setdefault(v.get("doc_name") or "—",
+                              {"pos": set(), "n": 0, "mn": None, "mx": None})
+        d["pos"].add(v.get("position_id"))
+        d["n"] += 1
+        pr = v.get("price")
+        if pr is not None:
+            d["mn"] = pr if d["mn"] is None else min(d["mn"], pr)
+            d["mx"] = pr if d["mx"] is None else max(d["mx"], pr)
+    rr = 5
+    for docname, d in sorted(by_doc.items(), key=lambda x: -x[1]["n"]):
+        _write_row(ws3, rr, [docname, len(d["pos"]), d["n"], d["mn"], d["mx"]],
+                   [4, 5], "#,##0")
+        rr += 1
+    _write_row(ws3, rr, ["ИТОГО", len(positions), len(variants), None, None],
+               [4, 5], "#,##0")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+HEAD_INV = ["Папка", "Файл", "Тип документа", "Год", "Валюта", "Страниц",
+            "Актуальный", "Разобран", "Позиций", "Вариантов-цен", "Замена",
+            "Заголовок (из содержимого)"]
+WIDTHS_INV = [26, 40, 18, 8, 9, 9, 12, 11, 10, 13, 22, 40]
+
+
+def build_inventory_workbook(records, docs):
+    """Sheet «Инвентаризация» (file classification) + «Покрытие» (coverage)."""
+    stamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Инвентаризация"
+    cur = sum(1 for r in records if r.get("is_current_listino"))
+    parsed = sum(1 for r in records if r.get("ingested"))
+    _title(ws, "Инвентаризация файлов фабрики",
+           f"файлов: {len(records)} · актуальных прайс-листов: {cur} · "
+           f"разобрано: {parsed} · выгрузка: {stamp}", len(HEAD_INV))
+    _style_header(ws, HEAD_INV, WIDTHS_INV)
+    r = 5
+    for rec in sorted(records, key=lambda x: (str(x.get("doc_type") or ""),
+                                              -(x.get("year") or 0),
+                                              str(x.get("name") or ""))):
+        vals = [rec.get("folder") or "/", rec.get("name"), rec.get("doc_type"),
+                rec.get("year"), rec.get("currency"), rec.get("pages"),
+                "да" if rec.get("is_current_listino") else "—",
+                "да" if rec.get("ingested") else "—",
+                rec.get("positions"), rec.get("variant_prices"),
+                rec.get("superseded_by") or "—", rec.get("sample_title")]
+        _write_row(ws, r, vals, [], "#,##0")
+        r += 1
+
+    ws2 = wb.create_sheet("Покрытие")
+    _title(ws2, "Покрытие по документам",
+           "страниц всего / с матрицами / разобрано / пропущено · позиций · "
+           f"вариантов-цен · выгрузка: {stamp}", 7)
+    _style_header(ws2, ["Документ", "Страниц", "С матрицами", "Разобрано",
+                        "Пропущено", "Позиций", "Вариантов-цен"],
+                  [40, 10, 13, 12, 12, 10, 14])
+    rr = 5
+    T = [0, 0, 0, 0, 0, 0]
+    for d in sorted(docs, key=lambda x: -(x.get("variant_prices") or 0)):
+        c = d.get("coverage") or {}
+        row = [c.get("pages_total") or d.get("pages") or 0, c.get("pages_with_matrix") or 0,
+               c.get("pages_parsed") or 0, c.get("pages_skipped") or 0,
+               d.get("positions") or 0, d.get("variant_prices") or 0]
+        _write_row(ws2, rr, [d.get("name")] + row, [], "#,##0")
+        for i in range(6):
+            T[i] += row[i]
+        rr += 1
+    _write_row(ws2, rr, ["ИТОГО"] + T, [], "#,##0")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

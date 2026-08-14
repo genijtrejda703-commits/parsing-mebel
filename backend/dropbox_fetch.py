@@ -9,7 +9,8 @@ import hashlib
 import os
 import re
 import shutil
-import urllib.request
+import subprocess
+import time
 import zipfile
 
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
@@ -32,28 +33,38 @@ def zip_path_for(url):
 
 def download_folder(url, log=lambda m: None):
     dest = zip_path_for(url)
+    os.makedirs(TMP, exist_ok=True)
     if os.path.exists(dest) and os.path.getsize(dest) > 1024:
         log(f"using cached archive {os.path.basename(dest)} "
             f"({os.path.getsize(dest) / 1e6:.0f} MB)")
         return dest
     dl = _force_dl(url)
-    log("requesting Dropbox folder archive (dl=1) ...")
-    req = urllib.request.Request(dl, headers={"User-Agent": UA})
+    log("requesting Dropbox folder archive (dl=1) via curl, following redirects ...")
     tmp = dest + ".part"
-    got = 0
-    with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "wb") as f:
-        total = int(r.headers.get("Content-Length") or 0)
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            f.write(chunk)
-            got += len(chunk)
-            if got % (100 << 20) < (1 << 20):
-                pct = f" ({got * 100 // total}%)" if total else ""
-                log(f"downloaded {got / 1e6:.0f} MB{pct}")
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    # curl follows Dropbox's 302 -> signed dl.dropboxusercontent.com URL reliably
+    proc = subprocess.Popen(
+        ["curl", "-sL", "--fail", "-A", UA, "--max-time", "1800", "-o", tmp, dl],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    last = 0
+    while proc.poll() is None:
+        time.sleep(5)
+        if os.path.exists(tmp):
+            mb = os.path.getsize(tmp) / 1e6
+            if mb - last >= 100:
+                log(f"downloaded {mb:.0f} MB ...")
+                last = mb
+    rc = proc.wait()
+    err = (proc.stderr.read().decode(errors="ignore") if proc.stderr else "")[:200]
+    if rc != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) < 1024:
+        raise RuntimeError(f"curl download failed (rc={rc}) {err}")
+    # sanity: must be a zip
+    with open(tmp, "rb") as f:
+        if f.read(2) != b"PK":
+            raise RuntimeError("downloaded payload is not a ZIP (link/token may be expired)")
     os.replace(tmp, dest)
-    log(f"archive ready: {got / 1e6:.0f} MB")
+    log(f"archive ready: {os.path.getsize(dest) / 1e6:.0f} MB")
     return dest
 
 
@@ -72,6 +83,21 @@ def list_pdfs(zip_path):
                 "is_price_list": ("_PL_" in name) or ("прайс" in info.filename.lower()),
             })
     out.sort(key=lambda x: (not x["is_price_list"], -x["size"]))
+    return out
+
+
+def list_spreadsheets(zip_path):
+    """Spreadsheet price files (xlsx/xls) — flagged, never geometrically parsed."""
+    out = []
+    with zipfile.ZipFile(zip_path) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            if info.filename.lower().endswith((".xlsx", ".xls")):
+                out.append({"rel": info.filename,
+                            "name": os.path.basename(info.filename),
+                            "size": info.file_size,
+                            "folder": os.path.dirname(info.filename) or "/"})
     return out
 
 

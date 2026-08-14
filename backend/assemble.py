@@ -4,11 +4,12 @@ A product = one column of a reconstructed price matrix (its dimension / variant
 code). Its variations = the finish rows down that column, which yields the
 min-max price range.
 """
+import hashlib
 import uuid
 from datetime import datetime, timezone
 
 from anomaly import MicrogradAnomalyModel, NUM_RE, featurize, weak_label
-from pipeline import describe_column
+from pipeline import describe_column, norm
 
 ACCEPT_CONF = 0.45
 FLAG_CONF = 0.60
@@ -187,3 +188,83 @@ def run_micrograd(pages, log=None):
         log(f"micrograd scored {n} price candidates")
     return model, {"trained": ok, "n_labelled": len(X), "pos": pos, "neg": neg,
                    "loss_curve": model.loss_curve, "acc_curve": model.acc_curve}
+
+
+
+# --------------------------------------------------------------------------- #
+# Directive 1: Position -> Variant -> Price
+# --------------------------------------------------------------------------- #
+# A POSITION is one model exactly as printed (e.g. "505 UP System"), deduped by
+# normalised name within a factory. A VARIANT-PRICE is a single cell of the
+# reconstructed matrix: one (variant_code, dimension, finish) -> one price, with
+# BOTH raw geometry chains kept (above-chain = dimension/variant code, left block
+# = finish, per the Molteni-inverted semantics). One position expands into its
+# whole variant list across all listini it appears in.
+
+def _vp_id(doc_id, page, bbox):
+    """Deterministic id for a price cell so re-ingest is idempotent."""
+    key = f"{doc_id}|{page}|{bbox}"
+    return hashlib.sha1(key.encode()).hexdigest()[:20]
+
+
+def flatten_variants(products):
+    """Explode column-level products into variant-price rows + position seeds.
+
+    Returns (variant_prices, position_seeds) where position_seeds is keyed by
+    normalised model name and carries the provenance needed to upsert a position.
+    """
+    vps = []
+    seeds = {}
+    ts = datetime.now(timezone.utc).isoformat()
+    for p in products:
+        printed = (p.get("model_name") or "Unassigned").strip()
+        nkey = norm(printed) or "UNASSIGNED"
+        seed = seeds.setdefault(nkey, {
+            "norm_name": nkey, "names": {}, "categories": set(),
+            "sections": set(), "collections": set(),
+            "docs": {}, "n_variants": 0, "prices": [], "confs": [],
+        })
+        seed["names"][printed] = seed["names"].get(printed, 0) + 1
+        if p.get("category"):
+            seed["categories"].add(p["category"])
+        if p.get("section"):
+            seed["sections"].add(p["section"])
+        if p.get("collection"):
+            seed["collections"].add(p["collection"])
+        seed["docs"].setdefault(p["doc_id"], p.get("doc_name"))
+        for v in (p.get("variations") or []):
+            if v.get("price") is None:
+                continue
+            vid = _vp_id(p["doc_id"], p["page"], v.get("bbox"))
+            vps.append({
+                "id": vid,
+                "norm_name": nkey,
+                "position_name": printed,
+                "factory_id": p["factory_id"],
+                "factory": p["factory"],
+                "doc_id": p["doc_id"],
+                "doc_name": p["doc_name"],
+                "collection": p.get("collection"),
+                "page": p["page"],
+                "page_width": p.get("page_width"),
+                "page_height": p.get("page_height"),
+                "variant_code": p.get("variant_code"),
+                "dimension": p.get("dimension"),
+                "finish": v.get("finish"),
+                "price": v.get("price"),
+                "currency": p.get("currency", "EUR"),
+                "raw": v.get("raw"),
+                "bbox": v.get("bbox"),
+                "bbox_row_label": v.get("bbox_row_label"),
+                "bbox_col_header": p.get("bbox_col_header"),
+                # both raw chains stored, per invariant
+                "above_chain_raw": p.get("col_header_raw"),
+                "left_raw": v.get("finish"),
+                "confidence": float(v.get("confidence", p.get("confidence", 0.5))),
+                "status": "pending",
+                "created_at": ts,
+            })
+            seed["n_variants"] += 1
+            seed["prices"].append(v.get("price"))
+            seed["confs"].append(float(v.get("confidence", p.get("confidence", 0.5))))
+    return vps, seeds

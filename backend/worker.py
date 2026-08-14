@@ -7,8 +7,10 @@ polls - so the UI sees live parsing status without a broker.
 """
 import asyncio
 import os
+import shutil
 import time
 import uuid
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -18,15 +20,17 @@ from fastapi.responses import JSONResponse, Response
 from pymongo import UpdateOne
 
 import db
+import inventory
 from assemble import build_products, run_micrograd
 from dropbox_fetch import (cleanup_archive, download_folder, extract, list_pdfs,
-                           zip_path_for)
+                           list_spreadsheets, zip_path_for)
 from pipeline import parse_pdf, render_page_png
 
 app = FastAPI(title="DataHub DS Worker")
 JOBQ: asyncio.Queue = asyncio.Queue()
 EXEC = ThreadPoolExecutor(max_workers=1)
 VEC_CACHE = {"stamp": None, "ids": [], "M": None}
+LOOP = None  # captured at startup for thread -> queue hand-off
 
 
 def now():
@@ -129,14 +133,110 @@ def _ingest_one(tid, path, name, factory, factory_id, max_pages, base_pct, span_
     for i in range(0, len(prods), 500):
         db.products.insert_many(prods[i:i + 500])
     n_flag = sum(1 for p in prods if p["anomaly"])
-    L(f"{name}: {len(prods)} products assembled, {stats['rejected_cells']} cells "
-      f"rejected as spatial anomalies, {n_flag} flagged for review")
+
+    # ---- Directive 1: derive positions + variant-prices ----
+    from assemble import flatten_variants
+    vps, seeds = flatten_variants(prods)
+    db.variant_prices.delete_many({"doc_id": doc_id})
+    _upsert_positions(factory_id, factory, seeds)
+    pos_map = {p["norm_name"]: p["id"] for p in
+               db.positions.find({"factory_id": factory_id}, {"norm_name": 1, "id": 1})}
+    for v in vps:
+        v["position_id"] = pos_map.get(v["norm_name"])
+    for i in range(0, len(vps), 1000):
+        db.variant_prices.insert_many(vps[i:i + 1000])
+    L(f"{name}: {len(prods)} matrix columns -> {len(vps)} variant-prices across "
+      f"{len(seeds)} positions, {stats['rejected_cells']} cells rejected, "
+      f"{n_flag} flagged for review")
+
+    # ---- coverage for Directive 2 (captured in this single parse) ----
+    pages_with_prices = sum(1 for pg in pages if pg["prices"])
+    pages_with_matrix = sum(1 for pg in pages if pg["tables"])
+    parsed_pages = {p["page"] for p in prods}
+    coverage = {
+        "pages_total": len(pages),
+        "pages_with_prices": pages_with_prices,
+        "pages_with_matrix": pages_with_matrix,
+        "pages_parsed": len(parsed_pages),
+        "pages_skipped": max(pages_with_matrix - len(parsed_pages), 0),
+        "positions": len(seeds),
+        "variant_prices": len(vps),
+        "rejected_cells": stats["rejected_cells"],
+    }
     db.documents.update_one({"id": doc_id}, {"$set": {
         "status": "parsed", "pages": len(pages), "products": len(prods),
-        "rejected_cells": stats["rejected_cells"],
+        "positions": len(seeds), "variant_prices": len(vps),
+        "rejected_cells": stats["rejected_cells"], "coverage": coverage,
         "micrograd": {k: v for k, v in mg.items() if k != "acc_curve"},
         "anomaly_samples": stats["anomaly_samples"], "parsed_at": now()}})
-    return len(prods), stats["rejected_cells"], mg
+    return len(prods), len(vps), stats["rejected_cells"], mg
+
+
+def _upsert_positions(factory_id, factory, seeds):
+    """Upsert one position per normalised model name within the factory.
+
+    Dedupe invariant: the same model across different listini is ONE position.
+    The exact printed name is resolved in the rollup (most frequent printed form).
+    """
+    for nkey, seed in seeds.items():
+        db.positions.update_one(
+            {"factory_id": factory_id, "norm_name": nkey},
+            {"$setOnInsert": {"id": str(uuid.uuid4()), "factory_id": factory_id,
+                              "factory": factory, "norm_name": nkey,
+                              "status": "pending", "reviewer_notes": "",
+                              "created_at": now()},
+             "$set": {"updated_at": now()},
+             "$addToSet": {
+                 "categories": {"$each": list(seed["categories"])},
+                 "sections": {"$each": list(seed["sections"])},
+                 "collections": {"$each": list(seed["collections"])},
+                 "name_variants": {"$each": list(seed["names"].keys())},
+                 "doc_ids": {"$each": list(seed["docs"].keys())}}},
+            upsert=True)
+
+
+def _rollup_positions(factory_id, log=None):
+    """Recompute per-position rollups from variant_prices; prune empty positions."""
+    agg = db.variant_prices.aggregate([
+        {"$match": {"factory_id": factory_id}},
+        {"$group": {"_id": "$position_id",
+                    "n": {"$sum": 1},
+                    "pmin": {"$min": "$price"},
+                    "pmax": {"$max": "$price"},
+                    "conf": {"$avg": "$confidence"},
+                    "names": {"$push": "$position_name"},
+                    "docs": {"$addToSet": "$doc_id"},
+                    "pages": {"$addToSet": "$page"}}}],
+        allowDiskUse=True)
+    live = set()
+    for g in agg:
+        pid = g["_id"]
+        if not pid:
+            continue
+        live.add(pid)
+        # canonical printed name = most frequent among this position's cells
+        counts = {}
+        for nm in g["names"]:
+            counts[nm] = counts.get(nm, 0) + 1
+        canonical = max(counts.items(), key=lambda kv: kv[1])[0] if counts else None
+        conf = float(g.get("conf") or 0.0)
+        db.positions.update_one({"id": pid}, {"$set": {
+            "name": canonical,
+            "n_variants": int(g["n"]),
+            "price_min": g.get("pmin"),
+            "price_max": g.get("pmax"),
+            "avg_confidence": round(conf, 4),
+            "flagged": conf < 0.60,
+            "n_docs": len(g.get("docs") or []),
+            "n_pages": len(g.get("pages") or []),
+            "updated_at": now()}})
+    # drop positions that no longer have any variant-prices
+    removed = db.positions.delete_many(
+        {"factory_id": factory_id, "id": {"$nin": list(live)}}).deleted_count
+    if log:
+        log(f"каталог позиций пересчитан: {len(live)} позиций активно, "
+            f"{removed} пустых удалено")
+    return len(live)
 
 
 def job_ingest(tid, payload):
@@ -163,29 +263,36 @@ def job_ingest(tid, payload):
         return
 
     L(f"ingestion queue: {len(files)} document(s) for {factory}")
-    total_prod = total_rej = 0
+    total_prod = total_var = total_rej = 0
     last_mg = {}
     base = 10.0
-    span = 88.0 / len(files)
+    span = 84.0 / len(files)
     for i, f in enumerate(files):
         try:
-            np_, nr_, mg = _ingest_one(tid, f["path"], f["name"], factory, factory_id,
-                                       max_pages, base + i * span, span)
+            np_, nv_, nr_, mg = _ingest_one(tid, f["path"], f["name"], factory,
+                                            factory_id, max_pages,
+                                            base + i * span, span)
             total_prod += np_
+            total_var += nv_
             total_rej += nr_
             last_mg = mg
             progress(tid, base + (i + 1) * span,
-                     {"products": total_prod, "rejected": total_rej,
+                     {"products": total_prod, "variant_prices": total_var,
+                      "rejected": total_rej,
                       "docs_done": i + 1, "docs_total": len(files),
                       "micrograd_loss": mg.get("loss_curve", [])[-20:],
                       "micrograd_acc": mg.get("acc_curve", [])[-20:]})
         except Exception as e:
             log(tid, f"{f['name']} failed: {type(e).__name__}: {e}", "error")
+    n_positions = _rollup_positions(factory_id, L)
+    progress(tid, 98, {"positions": n_positions, "variant_prices": total_var})
     if zp and payload.get("cleanup"):
         cleanup_archive(zp, L)
-    finish(tid, "done", {"products": total_prod, "rejected": total_rej,
+    finish(tid, "done", {"products": total_prod, "positions": n_positions,
+                         "variant_prices": total_var, "rejected": total_rej,
                          "micrograd": last_mg},
-           f"extraction complete - {total_prod} products, {total_rej} anomalies rejected")
+           f"готово — {n_positions} позиций, {total_var} вариантов-цен, "
+           f"{total_rej} аномалий отсеяно")
 
 
 def job_embed(tid, payload):
@@ -348,8 +455,161 @@ def job_anomalies(tid, payload):
            f"журнал готов — {total} отсеянных блоков задокументировано")
 
 
+def _join_ingested(records):
+    docmap = {d["name"]: d for d in db.documents.find(
+        {}, {"_id": 0, "id": 1, "name": 1, "coverage": 1, "positions": 1,
+             "variant_prices": 1, "pages": 1})}
+    for r in records:
+        d = docmap.get(r["name"])
+        if d:
+            r.update({"ingested": True, "doc_id": d["id"], "coverage": d.get("coverage"),
+                      "positions": d.get("positions"), "variant_prices": d.get("variant_prices")})
+        else:
+            r["ingested"] = False
+    return records
+
+
+def _persist_inventory(records, source):
+    ops = [UpdateOne({"rel": r["rel"], "source": source}, {"$set": r}, upsert=True)
+           for r in records]
+    if ops:
+        db.file_inventory.bulk_write(ops)
+
+
+def _enqueue(kind, title, payload, meta=None):
+    tid = new_task(kind, title, meta)
+    if LOOP is not None:
+        asyncio.run_coroutine_threadsafe(JOBQ.put((tid, kind, payload)), LOOP)
+    return tid
+
+
+def job_inventory(tid, payload):
+    start(tid)
+    L = lambda m: log(tid, m)
+    data_dir = os.environ.get("DATA_DIR", "/app/data")
+    molteni = os.path.join(data_dir, "molteni")
+    source = payload.get("source", "local")
+
+    if source == "local":
+        folder = payload.get("folder", molteni)
+        pdfs = sorted(f for f in os.listdir(folder) if f.lower().endswith(".pdf"))
+        L(f"инвентаризация {len(pdfs)} файлов в {folder} (по содержимому)")
+        records = []
+        for i, name in enumerate(pdfs):
+            rec = inventory.make_record(os.path.join(folder, name), "local", name)
+            records.append(rec)
+            L(f"  {name}: {rec['doc_type']} · {rec.get('year')} · "
+              f"{rec.get('currency')} · {rec['pages']} стр.")
+            progress(tid, 5 + 85 * (i + 1) / max(len(pdfs), 1),
+                     {"classified": i + 1, "total": len(pdfs)})
+        inventory.supersede_pass(records)
+        _join_ingested(records)
+        # decisive content signal from the actual parse: many matrix cells => price list
+        for r in records:
+            if (r.get("variant_prices") or 0) >= 200:
+                r["doc_type"] = "прайс-лист"
+        inventory.supersede_pass(records)  # re-run with corrected types
+        _join_ingested(records)
+        db.file_inventory.delete_many({"source": "local"})
+        _persist_inventory(records, "local")
+        cur = sum(1 for r in records if r["is_current_listino"])
+        finish(tid, "done", {"files": len(records), "current_listini": cur},
+               f"инвентаризация завершена — {len(records)} файлов, "
+               f"{cur} актуальных прайс-листов")
+        return
+
+    # ---- full Dropbox folder pass (strict read-only transit) ----
+    url = payload["url"]
+    st = os.statvfs(data_dir)
+    free_gb = st.f_bavail * st.f_frsize / 1e9
+    L(f"свободно на диске: {free_gb:.1f} ГБ")
+    if free_gb < 3.5:
+        finish(tid, "error", {}, f"мало места ({free_gb:.1f} ГБ) для транзита архива")
+        return
+    L("загрузка архива общей папки Dropbox (dl=1) во временное хранилище")
+    zp = download_folder(url, L)
+    entries = list_pdfs(zp)
+    L(f"в архиве {len(entries)} PDF; классификация entry-by-entry, "
+      f"каждый файл удаляется сразу после разбора")
+    tmpdir = os.path.join(data_dir, "tmp", "inv")
+    os.makedirs(tmpdir, exist_ok=True)
+    os.makedirs(molteni, exist_ok=True)
+    have = set(os.listdir(molteni))
+    records = []
+    with zipfile.ZipFile(zp) as zf:
+        for i, e in enumerate(entries):
+            tmp = os.path.join(tmpdir, e["name"])
+            try:
+                with zf.open(e["rel"]) as src, open(tmp, "wb") as dst:
+                    shutil.copyfileobj(src, dst, 1 << 20)
+                rec = inventory.make_record(tmp, "dropbox", e["rel"])
+                rec["folder"] = e.get("folder")
+                rec["size"] = e.get("size", rec.get("size"))
+                records.append(rec)
+            except Exception as ex:
+                L(f"  пропуск {e['name']}: {type(ex).__name__}: {ex}")
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)  # strict transit: payload removed immediately
+            if (i + 1) % 25 == 0 or i + 1 == len(entries):
+                progress(tid, 30 + 55 * (i + 1) / max(len(entries), 1),
+                         {"classified": i + 1, "total": len(entries)})
+                L(f"  классифицировано {i + 1}/{len(entries)}")
+    inventory.supersede_pass(records)
+
+    # flag spreadsheet price files (never parsed by the geometric engine)
+    for e in list_spreadsheets(zp):
+        records.append({
+            "id": str(uuid.uuid4()), "source": "dropbox", "rel": e["rel"],
+            "name": e["name"], "folder": e.get("folder"), "size": e.get("size"),
+            "pages": None, "doc_type": "таблица (не разбирается)",
+            "year": None, "currency": None, "is_current_listino": False,
+            "superseded_by": None, "ingested": False,
+            "sample_title": "электронная таблица — геометрический разбор не применим",
+            "classified_at": now()})
+
+    # keep + ingest current listini not already cached ONLY when requested
+    keepers = [r for r in records
+               if r.get("is_current_listino") and r["name"] not in have]
+    new_paths = []
+    ingest_tid = None
+    if keepers and payload.get("ingest_new", False):
+        with zipfile.ZipFile(zp) as zf:
+            for r in keepers:
+                dest = os.path.join(molteni, r["name"])
+                try:
+                    with zf.open(r["rel"]) as src, open(dest, "wb") as dst:
+                        shutil.copyfileobj(src, dst, 1 << 20)
+                    new_paths.append(dest)
+                except Exception as ex:
+                    L(f"  не удалось сохранить {r['name']}: {ex}")
+        L(f"сохранено {len(new_paths)} новых актуальных прайс-листов для разбора")
+
+    _join_ingested(records)
+    _persist_inventory(records, "dropbox")
+    if payload.get("cleanup", False):
+        cleanup_archive(zp, L)
+
+    if new_paths and payload.get("ingest_new", False):
+        ingest_tid = _enqueue("ingest", f"Разбор {len(new_paths)} новых прайс-листов",
+                              {"source": "local", "paths": new_paths,
+                               "factory": "Molteni & C"}, {"n": len(new_paths)})
+        L(f"поставлена задача разбора новых прайс-листов: {ingest_tid}")
+
+    cur = sum(1 for r in records if r.get("is_current_listino"))
+    kept = [r for r in records if r.get("is_current_listino") and r["name"] not in have]
+    msg = (f"полная инвентаризация — {len(records)} файлов, {cur} актуальных прайс-листов, "
+           + (f"{len(new_paths)} новых поставлено на разбор" if new_paths
+              else f"{len(kept)} новых доступно к разбору (авторазбор не запрошен)"))
+    finish(tid, "done",
+           {"files": len(records), "current_listini": cur,
+            "new_available": len(kept), "new_ingested": len(new_paths),
+            "ingest_task": ingest_tid}, msg)
+
+
 JOBS = {"scan": job_scan, "ingest": job_ingest, "embed": job_embed,
-        "photos": job_photos, "anomalies": job_anomalies}
+        "photos": job_photos, "anomalies": job_anomalies,
+        "inventory": job_inventory}
 
 
 async def consumer():
@@ -365,6 +625,8 @@ async def consumer():
 
 @app.on_event("startup")
 async def _startup():
+    global LOOP
+    LOOP = asyncio.get_running_loop()
     db.ensure_indexes()
     asyncio.create_task(consumer())
 
@@ -417,6 +679,17 @@ async def anomalies_job(req: Request):
     body = await req.json() if await req.body() else {}
     tid = new_task("anomalies", "Журнал отсеянных аномалий")
     await JOBQ.put((tid, "anomalies", body))
+    return {"task_id": tid}
+
+
+@app.post("/inventory")
+async def inventory_job(req: Request):
+    body = await req.json() if await req.body() else {}
+    src = body.get("source", "local")
+    title = ("Полная инвентаризация папки Dropbox" if src == "dropbox"
+             else "Инвентаризация локальных прайс-листов")
+    tid = new_task("inventory", title, {"source": src})
+    await JOBQ.put((tid, "inventory", body))
     return {"task_id": tid}
 
 
@@ -513,6 +786,12 @@ def _lexical_scores(q, limit=500):
 
 @app.post("/search")
 async def search(req: Request):
+    # graceful degradation (Directive: CLIP deferred): if the vector index is not
+    # built, return a clean "no embeddings yet" state without loading torch/CLIP.
+    if db.embeddings_col.estimated_document_count() == 0:
+        ct0 = req.headers.get("content-type", "")
+        mode0 = "image" if ct0.startswith("multipart/form-data") else "text"
+        return {"results": [], "mode": mode0, "note": "no embeddings yet"}
     import embeddings as E
     ct = req.headers.get("content-type", "")
     top_k = 24
@@ -636,3 +915,46 @@ def export(status: str = "approved", doc_id: str = "", factory: str = "",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="homeart_catalog.xlsx"',
                  "X-Rows": str(n_rows), "X-Products": str(len(prods))})
+
+
+@app.get("/export-inventory")
+def export_inventory():
+    from export_xlsx import build_inventory_workbook
+    records = list(db.file_inventory.find({}, {"_id": 0}).limit(5000))
+    docs = list(db.documents.find({}, {"_id": 0}))
+    data = build_inventory_workbook(records, docs)
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="homeart_inventory.xlsx"',
+                 "X-Files": str(len(records))})
+
+
+@app.get("/export-positions")
+def export_positions(status: str = "all", doc_id: str = "", factory: str = ""):
+    """Position-first workbook: sheets «Позиции», «Цены», «Сводка»."""
+    from export_xlsx import build_position_workbook
+    pq, vq = {}, {}
+    if status and status != "all":
+        pq["status"] = status
+        vq["status"] = status
+    if factory:
+        pq["factory"] = factory
+        vq["factory"] = factory
+    if doc_id:
+        vq["doc_id"] = doc_id
+    variants = list(db.variant_prices.find(vq, {"_id": 0}).limit(200000))
+    if doc_id:
+        pids = {v.get("position_id") for v in variants}
+        pq["id"] = {"$in": list(pids)}
+    positions = list(db.positions.find(pq, {"_id": 0}).limit(20000))
+    labels = {"approved": "только одобренные", "pending": "ожидают проверки",
+              "rejected": "отклонённые", "all": "все статусы"}
+    data = build_position_workbook(positions, variants, {
+        "factory": factory or (positions[0].get("factory") if positions else None),
+        "status_label": labels.get(status, status)})
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="homeart_positions.xlsx"',
+                 "X-Rows": str(len(variants)), "X-Positions": str(len(positions))})

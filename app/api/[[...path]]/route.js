@@ -60,23 +60,191 @@ async function handler(request, ctx) {
 
     if (route === '/stats' && method === 'GET') {
       const P = db.collection('products')
-      const [total, approved, pending, rejected, docs, facs, emb] = await Promise.all([
+      const [total, approved, pending, rejected, docs, facs, emb,
+        posTotal, posApproved, posPending, posFlagged, varTotal] = await Promise.all([
         P.countDocuments({}), P.countDocuments({ status: 'approved' }),
         P.countDocuments({ status: 'pending' }), P.countDocuments({ status: 'rejected' }),
         db.collection('documents').countDocuments({}),
         db.collection('factories').countDocuments({}),
         db.collection('product_embeddings').countDocuments({}),
+        db.collection('positions').countDocuments({}),
+        db.collection('positions').countDocuments({ status: 'approved' }),
+        db.collection('positions').countDocuments({ status: 'pending' }),
+        db.collection('positions').countDocuments({ flagged: true }),
+        db.collection('variant_prices').countDocuments({}),
       ])
       const agg = await P.aggregate([
         { $group: { _id: null, conf: { $avg: '$confidence' }, flagged: { $sum: { $cond: ['$anomaly', 1, 0] } } } },
       ]).toArray()
+      const pagg = await db.collection('positions').aggregate([
+        { $group: { _id: null, conf: { $avg: '$avg_confidence' } } },
+      ]).toArray()
       return ok({
         products: total, approved, pending, rejected, documents: docs, factories: facs,
         embeddings: emb, avg_confidence: agg[0]?.conf || 0, flagged: agg[0]?.flagged || 0,
+        positions: posTotal, positions_approved: posApproved, positions_pending: posPending,
+        positions_flagged: posFlagged, variant_prices: varTotal,
+        positions_avg_confidence: pagg[0]?.conf || 0,
       })
     }
 
+    // ---------------- positions (Directive 1: Position -> Variant -> Price) ----------------
+    if (route === '/positions/facets' && method === 'GET') {
+      const POS = db.collection('positions')
+      const [cats, docsFacet] = await Promise.all([
+        POS.aggregate([
+          { $unwind: '$categories' },
+          { $group: { _id: '$categories', n: { $sum: 1 } } },
+          { $sort: { n: -1 } }, { $limit: 60 },
+        ]).toArray(),
+        db.collection('documents').find({}, { projection: { _id: 0, id: 1, name: 1, positions: 1, variant_prices: 1 } })
+          .sort({ name: 1 }).toArray(),
+      ])
+      return ok({
+        categories: cats.map(c => ({ category: c._id, n: c.n })),
+        documents: docsFacet,
+      })
+    }
+
+    if (route === '/positions' && method === 'GET') {
+      const q = {}
+      if (qp.get('status') && qp.get('status') !== 'all') q.status = qp.get('status')
+      if (qp.get('flagged') === 'true') q.flagged = true
+      if (qp.get('category')) q.categories = qp.get('category')
+      const minVar = parseInt(qp.get('min_variants') || '0')
+      if (minVar > 0) q.n_variants = { $gte: minVar }
+      const term = (qp.get('q') || '').trim()
+      if (term) {
+        const rx = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+        q.$or = [{ name: rx }, { norm_name: rx }, { categories: rx }]
+      }
+      if (qp.get('doc_id')) q.doc_ids = qp.get('doc_id')
+      const sortKey = qp.get('sort') || 'best'
+      const sortSpec = sortKey === 'name' ? { name: 1 }
+        : sortKey === 'variants' ? { n_variants: -1, name: 1 }
+          : sortKey === 'price' ? { price_max: -1 }
+            : { avg_confidence: -1, n_variants: -1, name: 1 }
+      const limit = Math.min(parseInt(qp.get('limit') || '60'), 300)
+      const skip = parseInt(qp.get('skip') || '0')
+      const POS = db.collection('positions')
+      const [items, total] = await Promise.all([
+        POS.find(q, { projection: { _id: 0 } }).sort(sortSpec).skip(skip).limit(limit).toArray(),
+        POS.countDocuments(q),
+      ])
+      return ok({ items, total, skip, limit })
+    }
+
+    if (segs[0] === 'positions' && segs[1] && method === 'GET') {
+      const pos = await db.collection('positions').findOne({ id: segs[1] }, { projection: { _id: 0 } })
+      if (!pos) return bad('position not found', 404)
+      const variants = await db.collection('variant_prices')
+        .find({ position_id: segs[1] }, { projection: { _id: 0 } })
+        .sort({ doc_name: 1, page: 1, variant_code: 1, finish: 1 }).limit(5000).toArray()
+      // group by (doc, page) so the QA split-screen can raster one page at a time
+      const byPage = {}
+      for (const v of variants) {
+        const key = `${v.doc_id}__${v.page}`
+        if (!byPage[key]) byPage[key] = { doc_id: v.doc_id, doc_name: v.doc_name, page: v.page, page_width: v.page_width, page_height: v.page_height, variants: [] }
+        byPage[key].variants.push(v)
+      }
+      const docs = await db.collection('documents')
+        .find({ id: { $in: [...new Set(variants.map(v => v.doc_id))] } }, { projection: { _id: 0, id: 1, name: 1, collection: 1 } }).toArray()
+      return ok({ position: pos, variants, pages: Object.values(byPage), documents: docs })
+    }
+
+    if (segs[0] === 'positions' && segs[1] && (method === 'PATCH' || method === 'PUT')) {
+      const body = await request.json()
+      const allow = ['status', 'reviewer_notes', 'name']
+      const $set = { updated_at: new Date().toISOString() }
+      for (const k of allow) if (k in body) $set[k] = body[k]
+      await db.collection('positions').updateOne({ id: segs[1] }, { $set })
+      if (body.cascade_status && body.status) {
+        await db.collection('variant_prices').updateMany(
+          { position_id: segs[1] }, { $set: { status: body.status } })
+      }
+      const fresh = await db.collection('positions').findOne({ id: segs[1] }, { projection: { _id: 0 } })
+      return ok(fresh || {})
+    }
+
+    if (route === '/positions/bulk' && method === 'POST') {
+      const { ids, status } = await request.json()
+      if (!Array.isArray(ids) || !status) return bad('ids and status required')
+      const r = await db.collection('positions').updateMany(
+        { id: { $in: ids } }, { $set: { status, updated_at: new Date().toISOString() } })
+      return ok({ modified: r.modifiedCount })
+    }
+
     // ---------------- pipeline control (proxy to DS sidecar) ----------------
+    // ---------------- inventory + coverage (Directive 2) ----------------
+    if (route === '/inventory' && method === 'POST') {
+      const body = await request.json().catch(() => ({}))
+      return ok(await worker('/inventory', { method: 'POST', body: JSON.stringify(body) }))
+    }
+
+    if (route === '/inventory' && method === 'GET') {
+      const q = {}
+      if (qp.get('source')) q.source = qp.get('source')
+      if (qp.get('doc_type')) q.doc_type = qp.get('doc_type')
+      if (qp.get('current') === 'true') q.is_current_listino = true
+      if (qp.get('ingested') === 'true') q.ingested = true
+      const term = (qp.get('q') || '').trim()
+      if (term) {
+        const rx = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+        q.$or = [{ name: rx }, { sample_title: rx }, { group_key: rx }]
+      }
+      const INV = db.collection('file_inventory')
+      const [items, total, byType, curCount, ingCount] = await Promise.all([
+        INV.find(q, { projection: { _id: 0 } }).sort({ doc_type: 1, year: -1, name: 1 })
+          .limit(Math.min(parseInt(qp.get('limit') || '600'), 1000)).toArray(),
+        INV.countDocuments(q),
+        INV.aggregate([{ $match: q }, { $group: { _id: '$doc_type', n: { $sum: 1 } } }, { $sort: { n: -1 } }]).toArray(),
+        INV.countDocuments({ ...q, is_current_listino: true }),
+        INV.countDocuments({ ...q, ingested: true }),
+      ])
+      return ok({
+        items, total,
+        by_type: byType.map(t => ({ doc_type: t._id, n: t.n })),
+        current_listini: curCount, ingested: ingCount,
+      })
+    }
+
+    if (route === '/coverage' && method === 'GET') {
+      const docs = await db.collection('documents')
+        .find({}, { projection: { _id: 0, id: 1, name: 1, collection: 1, pages: 1, positions: 1, variant_prices: 1, coverage: 1, status: 1 } })
+        .sort({ variant_prices: -1 }).toArray()
+      const invCount = await db.collection('file_inventory').countDocuments({})
+      const inv = await db.collection('file_inventory')
+        .find({}, { projection: { _id: 0, name: 1, doc_type: 1, ingested: 1, pages: 1, year: 1, currency: 1 } }).toArray()
+      const tot = { pages_total: 0, pages_with_matrix: 0, pages_parsed: 0, pages_skipped: 0, positions: 0, variant_prices: 0, rejected_cells: 0 }
+      for (const d of docs) {
+        const c = d.coverage || {}
+        for (const k of Object.keys(tot)) tot[k] += (c[k] || 0)
+      }
+      // разобрано vs классифицировано без разбора
+      const classifiedOnly = inv.filter(x => !x.ingested)
+      return ok({
+        documents: docs,
+        totals: tot,
+        files_inventoried: invCount,
+        files_parsed: docs.length,
+        files_classified_only: classifiedOnly.length,
+        classified_only: classifiedOnly.slice(0, 400),
+      })
+    }
+
+    if (route === '/inventory/export' && method === 'GET') {
+      const res = await fetch(`${WORKER}/export-inventory`)
+      if (!res.ok) return bad(`export failed: ${await res.text()}`, res.status)
+      const buf = await res.arrayBuffer()
+      const name = `HOMEART_inventory_${new Date().toISOString().slice(0, 10)}.xlsx`
+      return new Response(buf, {
+        headers: {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'Content-Disposition': `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+        },
+      })
+    }
+
     if (route === '/scan' && method === 'POST') {
       const body = await request.json()
       return ok(await worker('/scan', { method: 'POST', body: JSON.stringify(body) }))
@@ -228,6 +396,25 @@ async function handler(request, ctx) {
     }
 
     // ---------------- excel export ----------------
+    if (route === '/export-positions' && method === 'GET') {
+      const p = new URLSearchParams({ status: qp.get('status') || 'all' })
+      if (qp.get('doc_id')) p.set('doc_id', qp.get('doc_id'))
+      if (qp.get('factory')) p.set('factory', qp.get('factory'))
+      const res = await fetch(`${WORKER}/export-positions?${p}`)
+      if (!res.ok) return bad(`export failed: ${await res.text()}`, res.status)
+      const buf = await res.arrayBuffer()
+      const stamp = new Date().toISOString().slice(0, 10)
+      const name = `HOMEART_positions_${qp.get('status') || 'all'}_${stamp}.xlsx`
+      return new Response(buf, {
+        headers: {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'Content-Disposition': `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+          'X-Rows': res.headers.get('X-Rows') || '0',
+          'X-Positions': res.headers.get('X-Positions') || '0',
+        },
+      })
+    }
+
     if (route === '/export' && method === 'GET') {
       const p = new URLSearchParams({
         status: qp.get('status') || 'approved',
