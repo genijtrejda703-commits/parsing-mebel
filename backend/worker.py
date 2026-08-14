@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import numpy as np
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from pymongo import UpdateOne
 
 import db
 from assemble import build_products, run_micrograd
@@ -196,33 +197,53 @@ def job_embed(tid, payload):
     q = {"embedded": {"$ne": True}}
     if payload.get("factory_id"):
         q["factory_id"] = payload["factory_id"]
+    # only index trustworthy extractions - front-matter prose would otherwise
+    # pollute the vector space and outrank real products
+    min_conf = payload.get("min_conf", 0.6)
+    if min_conf:
+        q["confidence"] = {"$gte": float(min_conf)}
     total = db.products.count_documents(q)
     if not total:
         finish(tid, "done", {"embedded": 0}, "nothing to embed - all products already vectorised")
         return
     L(f"embedding {total} products into the 512-d CLIP space")
     done = 0
-    B = 64
+    B = 128
     while True:
         batch = list(db.products.find(q, limit=B))
         if not batch:
             break
-        texts = [E.product_text(p) for p in batch]
-        vecs = E.encode_text(texts)
-        ops = []
-        for p, v in zip(batch, vecs):
-            db.embeddings_col.update_one({"product_id": p["id"]}, {"$set": {
-                "id": str(uuid.uuid4()), "product_id": p["id"],
-                "factory_id": p.get("factory_id"), "doc_id": p.get("doc_id"),
-                "kind": "text", "dim": int(v.shape[0]),
-                "vector": [float(x) for x in v], "created_at": now()}}, upsert=True)
-            ops.append(p["id"])
-        db.products.update_many({"id": {"$in": ops}}, {"$set": {"embedded": True}})
+        # information-poor rows (e.g. "TURNER. Sofas") become hubs that rank high
+        # for every query, so they are excluded from the vector index
+        texts, keep = [], []
+        for p in batch:
+            t = E.product_text(p)
+            if t.count(".") >= 2 or len(t) >= 40:
+                keep.append(p)
+                texts.append(t)
+        if texts:
+            vecs = E.encode_text(texts)
+            ops = []
+            for p, v, t in zip(keep, vecs, texts):
+                ops.append(UpdateOne({"product_id": p["id"]}, {"$set": {
+                    "id": str(uuid.uuid4()), "product_id": p["id"],
+                    "factory_id": p.get("factory_id"), "doc_id": p.get("doc_id"),
+                    "kind": "text", "dim": int(v.shape[0]), "text": t,
+                    "vector": [float(x) for x in v], "created_at": now()}}, upsert=True))
+            db.embeddings_col.bulk_write(ops, ordered=False)
+        db.products.update_many({"id": {"$in": [p["id"] for p in batch]}},
+                                {"$set": {"embedded": True}})
         done += len(batch)
         progress(tid, 100.0 * done / total, {"embedded": done})
-        if done % 256 < B:
+        if done % 1024 < B:
             L(f"vectorised {done}/{total}")
     VEC_CACHE["stamp"] = None
+    try:
+        C = _load_vectors()
+        M = C["M"]
+        L(f"vector index warm: {M.shape[0]} x {M.shape[1] if M.ndim > 1 else 0} float32, mean-centred copy ready")
+    except Exception as e:
+        L(f"vector cache warm skipped: {e}")
     finish(tid, "done", {"embedded": done}, f"{done} products embedded (512-d, CPU)")
 
 
@@ -295,16 +316,33 @@ def page_image(doc_id: str, page: int, dpi: int = 120):
 
 
 def _load_vectors():
-    stamp = db.embeddings_col.estimated_document_count()
-    if VEC_CACHE["stamp"] == stamp and VEC_CACHE["M"] is not None:
-        return VEC_CACHE["ids"], VEC_CACHE["M"]
+    """Load the vector index, plus a mean-centred copy.
+
+    The distilled multilingual CLIP text encoder is strongly anisotropic: every
+    product sentence shares a dominant direction, so raw cosine sits around 0.9
+    for everything and ranking collapses. Subtracting the dataset mean ('all but
+    the top') restores discrimination for text->text retrieval. Image->text
+    queries keep the raw space, because CLIP was trained for exactly that
+    alignment and the modality mean differs.
+    """
+    stamp = db.embeddings_col.count_documents({})
+    if VEC_CACHE["stamp"] == stamp and VEC_CACHE.get("M") is not None:
+        return VEC_CACHE
     ids, rows = [], []
     for e in db.embeddings_col.find({}, {"product_id": 1, "vector": 1}):
         ids.append(e["product_id"])
         rows.append(e["vector"])
-    M = np.asarray(rows, dtype=np.float32) if rows else np.zeros((0, 512), dtype=np.float32)
-    VEC_CACHE.update({"stamp": stamp, "ids": ids, "M": M})
-    return ids, M
+    if rows:
+        M = np.asarray(rows, dtype=np.float32)
+        mu = M.mean(axis=0)
+        Mc = M - mu
+        Mc /= np.clip(np.linalg.norm(Mc, axis=1, keepdims=True), 1e-8, None)
+    else:
+        M = np.zeros((0, 512), dtype=np.float32)
+        mu = np.zeros((512,), dtype=np.float32)
+        Mc = M
+    VEC_CACHE.update({"stamp": stamp, "ids": ids, "M": M, "Mc": Mc, "mu": mu})
+    return VEC_CACHE
 
 
 @app.post("/search")
@@ -326,17 +364,38 @@ async def search(req: Request):
         qv = E.encode_text([q])[0]
         mode = "text"
         top_k = int(body.get("top_k") or 24)
-    ids, M = _load_vectors()
+
+    C = _load_vectors()
+    ids, M, Mc, mu = C["ids"], C["M"], C["Mc"], C["mu"]
     if M.shape[0] == 0:
         return {"results": [], "mode": mode, "note": "no embeddings yet"}
-    sims = M @ np.asarray(qv, dtype=np.float32)
-    order = np.argsort(-sims)[:top_k]
-    picked = [ids[i] for i in order]
-    docs = {p["id"]: p for p in db.products.find({"id": {"$in": picked}}, {"_id": 0})}
-    out = []
-    for i in order:
-        p = docs.get(ids[i])
-        if p:
-            p["score"] = float(sims[i])
-            out.append(p)
+
+    qv = np.asarray(qv, dtype=np.float32)
+    if mode == "text":
+        qc = qv - mu
+        n = float(np.linalg.norm(qc))
+        sims = Mc @ (qc / (n if n > 1e-8 else 1.0))
+    else:
+        sims = M @ qv
+
+    # deep candidate pool, then one row per (model, category) so the grid is not
+    # 24 near-identical columns of the same product family
+    pool = int(min(max(top_k * 40, 400), M.shape[0]))
+    order = np.argsort(-sims)[:pool]
+    picked = [(ids[i], float(sims[i])) for i in order]
+    pmap = {p["id"]: p for p in db.products.find(
+        {"id": {"$in": [pid for pid, _ in picked]}}, {"_id": 0})}
+    seen, out = set(), []
+    for pid, s in picked:
+        p = pmap.get(pid)
+        if not p:
+            continue
+        key = (p.get("model_name"), p.get("category"))
+        if key in seen:
+            continue
+        seen.add(key)
+        p["score"] = s
+        out.append(p)
+        if len(out) >= top_k:
+            break
     return {"results": out, "mode": mode, "searched": int(M.shape[0])}

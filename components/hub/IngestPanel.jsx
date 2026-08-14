@@ -95,24 +95,24 @@ const IngestPanel = ({ onTaskStart }) => {
   return (
     <div className="p-6 space-y-5 max-w-[1500px]">
       <div className="grid gap-5 lg:grid-cols-[1.35fr_1fr]">
-        {/* -------- dropbox source -------- */}
+        {/* -------- источник Dropbox -------- */}
         <Card className="p-5 bg-card/70 border-border">
           <div className="flex items-center gap-2 mb-1">
             <FolderTree className="h-4 w-4 text-primary" />
-            <h3 className="font-serif text-lg">Dropbox shared folder</h3>
+            <h3 className="font-serif text-lg">Общая папка Dropbox</h3>
           </div>
           <p className="text-xs text-muted-foreground mb-4">
-            The folder is traversed as a single archive (<code className="text-primary">dl=1</code>),
-            nested sub-folders included. Cyrillic paths are handled.
+            Папка обходится одним архивом (<code className="text-primary">dl=1</code>),
+            включая вложенные подпапки. Кириллические пути поддерживаются.
           </p>
 
-          <Label className="text-[10px] tracking-widest text-muted-foreground">SHARE LINK</Label>
+          <Label className="text-[10px] tracking-widest text-muted-foreground">ССЫЛКА НА ПАПКУ</Label>
           <div className="flex gap-2 mt-1.5">
             <Input value={url} onChange={e => setUrl(e.target.value)}
               className="bg-background/60 font-mono text-xs h-10" />
             <Button onClick={scan} disabled={scanning || !url}
               className="h-10 shrink-0 bg-primary text-primary-foreground hover:bg-primary/90">
-              {scanning ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Traverse'}
+              {scanning ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Обойти папку'}
             </Button>
           </div>
 
@@ -120,13 +120,13 @@ const IngestPanel = ({ onTaskStart }) => {
             <div className="mt-4 rounded-md border border-border bg-background/60 p-3">
               <div className="flex items-center justify-between text-xs mb-2">
                 <span className="text-muted-foreground">
-                  {scanTask?.events?.slice(-1)[0]?.msg || 'contacting Dropbox…'}
+                  {scanTask?.events?.slice(-1)[0]?.msg || 'подключение к Dropbox…'}
                 </span>
                 <span className="text-primary">{Math.round(scanTask?.progress || 0)}%</span>
               </div>
               <Progress value={scanTask?.progress || 0} className="h-1" />
               <p className="mt-2 text-[11px] text-muted-foreground">
-                First traversal downloads the archive once, then it is cached on disk.
+                Первый обход скачивает архив один раз, далее он берётся из кеша на диске.
               </p>
             </div>
           )}
@@ -137,11 +137,11 @@ const IngestPanel = ({ onTaskStart }) => {
                 <div className="relative flex-1">
                   <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
                   <Input value={filter} onChange={e => setFilter(e.target.value)}
-                    placeholder="filter documents…" className="h-9 pl-8 bg-background/60 text-xs" />
+                    placeholder="фильтр документов…" className="h-9 pl-8 bg-background/60 text-xs" />
                 </div>
                 <Button variant="secondary" size="sm" className="h-9 text-xs"
                   onClick={() => setPicked(files.filter(f => f.is_price_list).map(f => f.rel))}>
-                  <CheckCheck className="h-3.5 w-3.5 mr-1" /> price lists
+                  <CheckCheck className="h-3.5 w-3.5 mr-1" /> только прайсы
                 </Button>
                 <Button variant="ghost" size="sm" className="h-9 text-xs"
                   onClick={() => setPicked([])}><X className="h-3.5 w-3.5" /></Button>
@@ -159,10 +159,10 @@ const IngestPanel = ({ onTaskStart }) => {
                     </div>
                     {f.is_price_list && (
                       <Badge variant="outline"
-                        className="text-[9px] border-primary/40 text-primary shrink-0">PRICE LIST</Badge>
+                        className="text-[9px] border-primary/40 text-primary shrink-0">ПРАЙС-ЛИСТ</Badge>
                     )}
-                    <span className="text-[10px] text-muted-foreground shrink-0 w-14 text-right">
-                      {(f.size / 1e6).toFixed(1)} MB
+                    <span className="text-[10px] text-muted-foreground shrink-0 w-16 text-right">
+                      {(f.size / 1e6).toFixed(1)} МБ
                     </span>
                   </button>
                 ))}
@@ -170,33 +170,36 @@ const IngestPanel = ({ onTaskStart }) => {
 
               <div className="mt-3 flex items-center justify-between">
                 <span className="text-xs text-muted-foreground">
-                  {picked.length} of {files.length} selected
+                  Выбрано {picked.length} из {files.length}
                 </span>
                 <Button disabled={!picked.length || starting}
                   onClick={() => ingest({ source: 'dropbox', url, rels: picked })}
                   className="bg-primary text-primary-foreground hover:bg-primary/90">
                   {starting ? <Loader2 className="h-4 w-4 animate-spin" /> :
-                    <><Play className="h-4 w-4 mr-1.5" /> Extract {picked.length} document(s)</>}
+                    <><Play className="h-4 w-4 mr-1.5" /> Запустить извлечение ({picked.length})</>}
                 </Button>
               </div>
             </div>
           )}
         </Card>
 
-        {/* -------- options + upload -------- */}
+        {/* -------- параметры + загрузка -------- */}
         <div className="space-y-5">
           <Card className="p-5 bg-card/70 border-border">
-            <h3 className="font-serif text-lg mb-4">Run configuration</h3>
+            <h3 className="font-serif text-lg mb-4">Параметры запуска</h3>
             <div className="space-y-4">
               <div>
-                <Label className="text-[10px] tracking-widest text-muted-foreground">FACTORY</Label>
+                <Label className="text-[10px] tracking-widest text-muted-foreground">ФАБРИКА</Label>
                 <Input value={factory} onChange={e => setFactory(e.target.value)}
                   className="mt-1.5 h-10 bg-background/60" />
+                <p className="mt-1.5 text-[11px] text-muted-foreground">
+                  Укажите новую фабрику и её ссылку на Dropbox — движок извлечёт её без правок кода.
+                </p>
               </div>
               <div>
-                <Label className="text-[10px] tracking-widest text-muted-foreground">PAGE SCOPE</Label>
+                <Label className="text-[10px] tracking-widest text-muted-foreground">ОБЪЁМ СТРАНИЦ</Label>
                 <div className="mt-1.5 grid grid-cols-3 gap-2">
-                  {[['0', 'All pages'], ['60', 'First 60'], ['150', 'First 150']].map(([v, l]) => (
+                  {[['0', 'Все страницы'], ['60', 'Первые 60'], ['150', 'Первые 150']].map(([v, l]) => (
                     <Button key={v} variant={maxPages === v ? 'default' : 'secondary'}
                       onClick={() => setMaxPages(v)}
                       className={`h-9 text-xs ${maxPages === v ? 'bg-primary text-primary-foreground' : ''}`}>
@@ -205,15 +208,17 @@ const IngestPanel = ({ onTaskStart }) => {
                   ))}
                 </div>
                 <p className="mt-2 text-[11px] text-muted-foreground">
-                  Molteni price lists run 400+ pages each. Use a scope for a fast demo pass.
+                  Прайсы Molteni содержат 400+ страниц каждый. Для быстрой демонстрации ограничьте объём.
                 </p>
               </div>
             </div>
           </Card>
 
           <Card className="p-5 bg-card/70 border-border">
-            <h3 className="font-serif text-lg mb-1">Direct upload</h3>
-            <p className="text-xs text-muted-foreground mb-4">Drop a PDF price list to parse it immediately.</p>
+            <h3 className="font-serif text-lg mb-1">Прямая загрузка</h3>
+            <p className="text-xs text-muted-foreground mb-4">
+              Перетащите PDF-прайс, чтобы разобрать его сразу.
+            </p>
             <div
               onDragOver={e => e.preventDefault()}
               onDrop={e => { e.preventDefault(); upload(e.dataTransfer.files) }}
@@ -221,8 +226,10 @@ const IngestPanel = ({ onTaskStart }) => {
               className="cursor-pointer rounded-lg border border-dashed border-border hover:border-primary/60 hover:bg-primary/[0.04] transition-colors p-8 text-center">
               {uploading ? <Loader2 className="h-6 w-6 mx-auto animate-spin text-primary" /> :
                 <UploadCloud className="h-6 w-6 mx-auto text-muted-foreground" />}
-              <div className="mt-3 text-xs text-foreground">Drop PDFs here or click to browse</div>
-              <div className="text-[10px] text-muted-foreground mt-1">parsed with the same geometric engine</div>
+              <div className="mt-3 text-xs text-foreground">Перетащите PDF или нажмите для выбора</div>
+              <div className="text-[10px] text-muted-foreground mt-1">
+                обрабатывается тем же геометрическим движком
+              </div>
             </div>
             <input ref={fileRef} type="file" accept="application/pdf" multiple hidden
               onChange={e => upload(e.target.files)} />

@@ -44,10 +44,10 @@ async function handler(request, ctx) {
     // ---------------- auth ----------------
     if (route === '/auth/login' && method === 'POST') {
       const { password } = await request.json()
-      if (!password || password !== process.env.MASTER_PASSWORD) return bad('Invalid access key', 401)
+      if (!password || password !== process.env.MASTER_PASSWORD) return bad('Неверный ключ доступа', 401)
       return ok({
         token: Buffer.from(`hub:${Date.now()}`).toString('base64'),
-        user: { name: 'Reviewer', role: 'admin' },
+        user: { name: 'Проверяющий', role: 'admin' },
       })
     }
 

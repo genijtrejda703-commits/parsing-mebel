@@ -7,23 +7,32 @@ import LoginScreen from '@/components/hub/LoginScreen'
 import IngestPanel from '@/components/hub/IngestPanel'
 import TaskMonitor from '@/components/hub/TaskMonitor'
 import QaWorkbench from '@/components/hub/QaWorkbench'
+import SpotlightSearch from '@/components/hub/SpotlightSearch'
 import {
   Boxes, DownloadCloud, FolderInput, LayoutGrid, LogOut, Radar, Activity,
 } from 'lucide-react'
 
 const NAV = [
-  { id: 'ingest', label: 'Ingest', icon: FolderInput, ready: true },
-  { id: 'monitor', label: 'Task Monitor', icon: Activity, ready: true },
-  { id: 'catalog', label: 'QA Workbench', icon: LayoutGrid, ready: true },
-  { id: 'spotlight', label: 'Spotlight Search', icon: Radar, ready: false },
-  { id: 'export', label: 'Excel Export', icon: DownloadCloud, ready: false },
+  { id: 'ingest', label: 'Загрузка прайсов', icon: FolderInput, ready: true },
+  { id: 'monitor', label: 'Очередь задач', icon: Activity, ready: true },
+  { id: 'catalog', label: 'Контроль качества', icon: LayoutGrid, ready: true },
+  { id: 'spotlight', label: 'Умный поиск', icon: Radar, ready: true },
+  { id: 'export', label: 'Экспорт каталога', icon: DownloadCloud, ready: false },
 ]
+
+const TITLES = {
+  ingest: 'Загрузка прайс-листов',
+  monitor: 'Очередь задач конвейера',
+  catalog: 'Контроль качества',
+  spotlight: 'Умный поиск по каталогу',
+}
 
 const App = () => {
   const [authed, setAuthed] = useState(false)
   const [booted, setBooted] = useState(false)
   const [view, setView] = useState('ingest')
   const [activeTask, setActiveTask] = useState(null)
+  const [seedTerm, setSeedTerm] = useState('')
   const [stats, setStats] = useState(null)
   const [worker, setWorker] = useState(null)
 
@@ -51,16 +60,10 @@ const App = () => {
   if (!booted) return <div className="min-h-screen bg-background" />
   if (!authed) return <LoginScreen onAuthed={() => setAuthed(true)} />
 
-  const title = {
-    ingest: 'Document ingestion',
-    monitor: 'Pipeline task monitor',
-    catalog: 'Quality assurance workbench',
-  }[view] || view
-
   return (
     <div className="min-h-screen flex bg-background">
-      {/* ---- rail ---- */}
-      <aside className="w-[236px] shrink-0 border-r border-border flex flex-col">
+      {/* ---- боковая панель ---- */}
+      <aside className="w-[248px] shrink-0 border-r border-border flex flex-col">
         <div className="px-5 py-4 border-b border-border">
           <div className="flex items-center gap-2.5">
             <div className="h-8 w-8 rounded-md bg-primary grid place-items-center">
@@ -82,7 +85,7 @@ const App = () => {
                 ${!n.ready ? 'opacity-40 cursor-not-allowed' : ''}`}>
               <n.icon className={`h-4 w-4 ${view === n.id ? 'text-primary' : ''}`} />
               <span className="flex-1 text-left">{n.label}</span>
-              {!n.ready && <span className="text-[8px] tracking-wider text-muted-foreground">NEXT</span>}
+              {!n.ready && <span className="text-[8px] tracking-wider text-muted-foreground">СКОРО</span>}
             </button>
           ))}
         </nav>
@@ -90,49 +93,50 @@ const App = () => {
         <div className="mt-auto p-4 space-y-3 border-t border-border">
           <div className="space-y-1.5">
             {[
-              ['Products', stats?.products ?? 0],
-              ['Approved', stats?.approved ?? 0],
-              ['Flagged', stats?.flagged ?? 0],
-              ['Documents', stats?.documents ?? 0],
+              ['Позиций', stats?.products ?? 0],
+              ['Одобрено', stats?.approved ?? 0],
+              ['Помечено', stats?.flagged ?? 0],
+              ['Векторов', stats?.embeddings ?? 0],
+              ['Документов', stats?.documents ?? 0],
             ].map(([l, v]) => (
               <div key={l} className="flex items-center justify-between text-[11px]">
                 <span className="text-muted-foreground">{l}</span>
-                <span className="tabular-nums">{new Intl.NumberFormat().format(v)}</span>
+                <span className="tabular-nums">{new Intl.NumberFormat('ru-RU').format(v)}</span>
               </div>
             ))}
           </div>
           <div className="flex items-center gap-2 text-[10px]">
             <span className={`h-1.5 w-1.5 rounded-full ${worker?.ok ? 'bg-emerald-400' : 'bg-destructive'}`} />
             <span className="text-muted-foreground">
-              DS worker {worker?.ok ? 'online' : 'offline'}
-              {worker?.queue ? ` · ${worker.queue} queued` : ''}
+              DS-воркер {worker?.ok ? 'онлайн' : 'офлайн'}
+              {worker?.queue ? ` · в очереди: ${worker.queue}` : ''}
             </span>
           </div>
           <Button variant="ghost" size="sm"
             onClick={() => { localStorage.removeItem('hub_token'); setAuthed(false) }}
             className="w-full h-7 text-[11px] text-muted-foreground justify-start px-2">
-            <LogOut className="h-3.5 w-3.5 mr-2" /> Sign out
+            <LogOut className="h-3.5 w-3.5 mr-2" /> Выйти
           </Button>
         </div>
       </aside>
 
-      {/* ---- main ---- */}
+      {/* ---- основная область ---- */}
       <main className="flex-1 min-w-0">
         <header className="h-[73px] border-b border-border px-6 flex items-center justify-between">
           <div>
-            <h1 className="font-serif text-xl">{title}</h1>
+            <h1 className="font-serif text-xl">{TITLES[view] || view}</h1>
             <p className="text-[11px] text-muted-foreground mt-0.5">
-              Molteni &amp; C · geometric PyMuPDF extraction · micrograd anomaly scoring
+              Molteni &amp; C · геометрическое извлечение PyMuPDF · оценка аномалий micrograd
             </p>
           </div>
           <div className="flex items-center gap-2">
             {stats?.avg_confidence ? (
               <Badge variant="outline" className="text-[10px] border-emerald-500/40 text-emerald-400">
-                mean confidence {(stats.avg_confidence * 100).toFixed(1)}%
+                средняя точность {(stats.avg_confidence * 100).toFixed(1)}%
               </Badge>
             ) : null}
             <Badge variant="outline" className="text-[10px] border-border text-muted-foreground">
-              {stats?.pending ?? 0} pending review
+              ожидают проверки: {new Intl.NumberFormat('ru-RU').format(stats?.pending ?? 0)}
             </Badge>
           </div>
         </header>
@@ -143,7 +147,16 @@ const App = () => {
         {view === 'monitor' && (
           <TaskMonitor activeTaskId={activeTask} onOpenCatalog={() => setView('catalog')} />
         )}
-        {view === 'catalog' && <QaWorkbench />}
+        {view === 'catalog' && <QaWorkbench seedTerm={seedTerm} />}
+        {view === 'spotlight' && (
+          <SpotlightSearch
+            stats={stats}
+            onOpenInQa={(p) => {
+              setSeedTerm(p.variant_code || p.model_name || '')
+              setView('catalog')
+            }}
+          />
+        )}
       </main>
     </div>
   )

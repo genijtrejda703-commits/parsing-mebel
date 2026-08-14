@@ -234,6 +234,37 @@ backend:
         -agent: "testing"
         -comment: "✅ TESTED - GET /api/page-image returns valid PNG image (162.2 KB) with correct Content-Type: image/png and PNG magic bytes (\\x89PNG) verified. Tested with real doc_id and page number from products. GET /api/page-image with bogus doc_id returns 404 error status (no crash)."
 
+  - task: "Slice 2: dual CLIP embedding job (/api/embed)"
+    implemented: true
+    working: true
+    file: "backend/worker.py, backend/embeddings.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "POST /api/embed {} enqueues an embed task -> {task_id}. Real sentence-transformers models on CPU: text = clip-ViT-B-32-multilingual-v1, image = clip-ViT-B-32, both 512-d. The index is ALREADY BUILT (16,309 vectors of 20,499 products - only confidence>=0.6 rows are indexed on purpose, information-poor rows whose text has <3 components are skipped as hubs). So a fresh POST /api/embed should finish almost immediately reporting embedded=0 or a very small number, because products are already flagged embedded=true. Verify: task reaches status done, result.embedded is a number, and /api/stats embeddings count does NOT drop. DO NOT wipe product_embeddings - rebuilding costs ~8 minutes of CPU."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ TESTED - POST /api/embed working correctly: (1) Task created successfully with task_id. (2) Task completed with status='done' and result.embedded=0 (as expected, all products already embedded). (3) CRITICAL: Embeddings count remained stable at 16,309 before and after (no decrease). (4) Vector index integrity preserved. Embed job completes almost immediately since products are already flagged embedded=true."
+
+  - task: "Slice 2: Spotlight vector search (/api/search) text + image"
+    implemented: true
+    working: true
+    file: "backend/worker.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "POST /api/search with JSON {q, top_k} does TEXT search: the query is encoded by the multilingual CLIP text encoder, then compared in a MEAN-CENTRED 512-d space (centering is required - raw cosine sat at ~0.9 for everything and ranking collapsed). POST /api/search as multipart/form-data with field 'file' (an image) does IMAGE search using the CLIP image encoder against the RAW (uncentered) space. Expected response {results:[...with score...], mode:'text'|'image', searched:<int>}. Verify: (1) {'q':'диван из кожи','top_k':8} returns 8 results whose model_name/category are sofas (GREGOR/LUCIO/CLEO/AUGUSTO) with score>0.7; (2) {'q':'кухонный модуль с ящиками'} returns KITCHEN BOX DRAWERS first; (3) {'q':'dining table oak'} returns table-ish rows; (4) empty q returns {results:[],mode:'text'} and not a 500; (5) results are de-duplicated - no two results share the same (model_name, category) pair; (6) each result carries score, price_min, price_max, doc_id, page so the UI can render a page thumbnail; (7) an image upload (generate/download any small JPEG, e.g. via PIL) returns mode='image' with 8 results and scores in the 0.2-0.35 CLIP image-text band. Latency should be well under 3s for text queries after the first call (the vector matrix is cached in memory)."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ TESTED - POST /api/search working correctly for both TEXT and IMAGE modes: TEXT MODE: (1) Russian query 'диван из кожи' returns 8 sofa/pouf results (TURNER, GREGOR, LUCIO, CLEO, AUGUSTO found) with top score=0.7964 (>0.7 ✓). (2) Russian query 'кухонный модуль с ящиками' returns KITCHEN BOX DRAWERS as first result ✓. (3) Russian query 'кровать' returns bed-related rows (BED ACCESSORIES, daybed) ✓. (4) English query 'dining table oak' returns table rows (WOODY, MONK found) ✓. (5) Empty query returns {results:[], mode:'text'} with HTTP 200 (not 500) ✓. (6) De-duplication PASSED: no duplicate (model_name, category) pairs in any query ✓. (7) All required fields present in results: score, price_min, price_max, doc_id, page, model_name, n_variations ✓. (8) Searched count: 16309 (matches embeddings count) ✓. IMAGE MODE: (9) PIL-generated 400x300 JPEG uploaded successfully ✓. (10) Returns mode='image' with 8 results ✓. (11) Scores in expected CLIP image-text band: 0.29-0.30 (within 0.1-0.45 range) ✓. (12) All required fields present: score, doc_id, page ✓. LATENCY: Warm text query latency measured at 0.241s (well under 3s threshold) ✓. SEMANTIC CORRECTNESS: Russian-language queries return semantically correct furniture types ✓. EMBEDDING TEXT BUILDER: Product texts are clean semantic strings with format 'MODEL. category. finishes. Collection, Section' - no price text (EUR/€) and no variant codes found ✓."
+
+
 frontend:
   - task: "Login screen, shell, Ingest, Task Monitor, QA split-screen"
     implemented: true
@@ -255,12 +286,8 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Auth login with MASTER_PASSWORD"
-    - "Products query, filters, sorting, facets"
-    - "QA review: PATCH product status / reviewer_notes / price range edit"
-    - "PDF page raster proxy for QA split-screen"
-    - "Task monitor endpoints"
-    - "Real PyMuPDF spatial parsing + micrograd ingestion pipeline"
+    - "Slice 2: Spotlight vector search (/api/search) text + image"
+    - "Slice 2: dual CLIP embedding job (/api/embed)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -307,3 +334,77 @@ agent_communication:
       Database state: 20,499 products, 5 documents, 1 factory, avg_confidence=0.799, 4,169 flagged
       
       NO CRITICAL ISSUES FOUND. Backend is production-ready.
+    -agent: "main"
+    -message: |
+      SLICE 2 (Spotlight Search) is now implemented - please test ONLY the two new
+      Slice 2 backend tasks (/api/embed and /api/search). Everything else already
+      passed 26/26 and does not need retesting.
+
+      CRITICAL - things that will waste a lot of time if you break them:
+        * The vector index is ALREADY BUILT: 16,309 embeddings. DO NOT delete or wipe
+          the `product_embeddings` collection and do not set products.embedded=false.
+          Rebuilding costs ~8 minutes of CPU inference.
+        * Do NOT restart the `dsworker` supervisor program while a task is running.
+        * Do NOT call /api/scan (2.5 GB Dropbox archive).
+        * Do NOT modify /app/.env.
+
+      Implementation notes you need to test correctly:
+        * TEXT search compares in a MEAN-CENTRED space; IMAGE search compares in the raw
+          space. This asymmetry is intentional (documented in worker.py::_load_vectors).
+        * Text-mode cosine scores land roughly in 0.35-0.85; image-mode scores land
+          roughly in 0.2-0.35. Do not assert image scores > 0.7.
+        * Results are de-duplicated by (model_name, category), drawn from a deep
+          candidate pool, so `len(results)` should equal top_k for common queries.
+        * For the image test, create a small JPEG locally with PIL (do not download
+          anything large) and POST it as multipart field name 'file'.
+
+      Report: any 500s, whether Russian queries return semantically correct furniture,
+      whether de-duplication holds, whether every result carries score/price_min/
+      price_max/doc_id/page, and the measured latency of a warm text query.
+    -agent: "testing"
+    -message: |
+      ✅ SLICE 2 BACKEND TESTING COMPLETE - ALL 6 TESTS PASSED (100%)
+      
+      Tested ONLY the two new Slice 2 backend tasks as requested. All tests passed with no critical issues.
+      
+      TEST RESULTS:
+      
+      A) POST /api/embed ✅
+         • Task created and completed successfully (status=done)
+         • Result: embedded=0 (expected - all products already embedded)
+         • CRITICAL: Embeddings count stable at 16,309 (no decrease) ✓
+         • Vector index integrity preserved ✓
+      
+      B) POST /api/search - TEXT MODE ✅
+         • Russian query "диван из кожи" (leather sofa): Returns 8 sofa/pouf results (TURNER, GREGOR, LUCIO, CLEO, AUGUSTO), top score=0.7964 (>0.7) ✓
+         • Russian query "кухонный модуль с ящиками" (kitchen module): Returns KITCHEN BOX DRAWERS as first result ✓
+         • Russian query "кровать" (bed): Returns bed-related rows (BED ACCESSORIES, daybed) ✓
+         • English query "dining table oak": Returns table rows (WOODY, MONK) ✓
+         • Mode: "text" ✓
+         • Searched: 16,309 (matches embeddings count) ✓
+         • De-duplication: PASSED - no duplicate (model_name, category) pairs ✓
+         • All required fields present: score, price_min, price_max, doc_id, page, model_name, n_variations ✓
+         • Semantic correctness: Russian queries return correct furniture types ✓
+      
+      C) POST /api/search - EMPTY QUERY ✅
+         • Returns {results:[], mode:"text"} with HTTP 200 (not 500) ✓
+      
+      D) POST /api/search - IMAGE MODE ✅
+         • PIL-generated 400x300 JPEG uploaded successfully ✓
+         • Mode: "image" ✓
+         • Returns 8 results ✓
+         • Scores in expected CLIP image-text band: 0.29-0.30 (within 0.1-0.45 range) ✓
+         • All required fields present: score, doc_id, page ✓
+      
+      E) LATENCY ✅
+         • Warm text query latency: 0.241s (well under 3s threshold) ✓
+      
+      F) EMBEDDING TEXT BUILDER ✅
+         • Product texts are clean semantic strings ✓
+         • Format: "MODEL. category. finishes. Collection, Section" ✓
+         • No price text (EUR/€) ✓
+         • No variant codes ✓
+      
+      SUMMARY: Both Slice 2 endpoints (/api/embed and /api/search) are working correctly.
+      NO CRITICAL ISSUES FOUND. Vector search is production-ready.
+

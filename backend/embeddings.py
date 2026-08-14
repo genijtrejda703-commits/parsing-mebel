@@ -10,6 +10,7 @@ the worker boots instantly.
 """
 import io
 import os
+import re
 import threading
 
 import numpy as np
@@ -73,17 +74,60 @@ def encode_image_bytes(raw):
     return encode_images([img])[0]
 
 
+_DROP_TOKENS = {"PL", "EN", "EUR", "IT", "CL", "TD", "FN", "EXPORT", "UPDATE", "PDF"}
+
+
+def collection_label(name):
+    """'2026_PL_Living-Systems-Dining_EN_EUR.pdf' -> 'Living, Systems, Dining'.
+
+    This matters a lot: the raw price-list tables never contain the words a buyer
+    actually searches for ('sofa', 'kitchen', 'dining'), so the document family is
+    the only place that vocabulary exists. Injecting it makes the vector space
+    searchable in natural language.
+    """
+    base = os.path.splitext(str(name or ""))[0]
+    parts = re.split(r"[_\-\s]+", base)
+    keep = [p for p in parts if p and p.upper() not in _DROP_TOKENS and not p.isdigit()]
+    return ", ".join(keep)
+
+
+def _clean_bit(t, maxlen=70):
+    """Keep only short, human-meaningful fragments (drops numbers, glyph
+    artefacts like '>' and the prose that leaks in from terms-and-conditions
+    pages)."""
+    t = re.sub(r"\s+", " ", str(t or "")).strip(" .,;:·>*-\u2013\u2014")
+    if len(t) < 2 or len(t) > maxlen:
+        return None
+    if not re.search(r"[A-Za-z\u0400-\u04FF]", t):
+        return None
+    return t
+
+
 def product_text(p):
-    """Canonical multilingual sentence describing one product row."""
-    bits = [p.get("model_name"), p.get("category"), p.get("dimension"),
-            p.get("variant_code"), p.get("collection"), p.get("section")]
-    finishes = [v.get("finish") for v in (p.get("variations") or [])[:4] if v.get("finish")]
-    bits.extend(finishes)
-    text = ", ".join(str(b) for b in bits if b)
-    price = p.get("price_min")
-    if price is not None:
-        text += f", price from {price} to {p.get('price_max')} EUR"
-    return text
+    """Canonical multilingual sentence describing one product row.
+
+    Deliberately excludes the price and the variant code: they are template noise
+    identical across thousands of rows, which inflates the shared component of the
+    embedding space and destroys cosine discrimination.
+    """
+    model = _clean_bit(p.get("model_name"))
+    category = _clean_bit(p.get("category"))
+    if model and category and category.lower() == model.lower():
+        category = None
+    finishes = []
+    for v in (p.get("variations") or [])[:6]:
+        f = _clean_bit(v.get("finish"), 50)
+        if f and f.lower() not in [x.lower() for x in finishes]:
+            finishes.append(f)
+    label = collection_label(p.get("doc_name") or p.get("collection"))
+    section = _clean_bit(p.get("section"), 40)
+    bits = [model, category]
+    if finishes:
+        bits.append(", ".join(finishes[:5]))
+    tail = ", ".join([x for x in [label, section] if x])
+    if tail:
+        bits.append(tail)
+    return ". ".join([b for b in bits if b])
 
 
 def cosine_matrix(query_vec, matrix):
