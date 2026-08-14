@@ -247,7 +247,109 @@ def job_embed(tid, payload):
     finish(tid, "done", {"embedded": done}, f"{done} products embedded (512-d, CPU)")
 
 
-JOBS = {"scan": job_scan, "ingest": job_ingest, "embed": job_embed}
+def job_photos(tid, payload):
+    """Map every product to the vector illustration sitting above its matrix."""
+    start(tid)
+    L = lambda m: log(tid, m)
+    from photos import map_document
+    docs = list(db.documents.find({}, {"_id": 0}))
+    if not docs:
+        finish(tid, "done", {"photos": 0}, "нет документов для обработки")
+        return
+    L(f"сканирование векторной графики: {len(docs)} документ(ов)")
+    total = 0
+    for n, d in enumerate(docs):
+        if not os.path.exists(d.get("path", "")):
+            L(f"{d.get('name')}: файл недоступен, пропуск")
+            continue
+        prods = list(db.products.find({"doc_id": d["id"]},
+                                      {"_id": 0, "id": 1, "page": 1, "bbox": 1}))
+        by_page = {}
+        for p in prods:
+            by_page.setdefault(p.get("page", 0), []).append((p["id"], p.get("bbox")))
+        L(f"{d['name']}: {len(prods)} позиций на {len(by_page)} страницах")
+
+        def on_page(i, t, k, _n=n, _name=d["name"]):
+            progress(tid, 100.0 * (_n + i / max(t, 1)) / len(docs))
+            if i % 100 == 0:
+                log(tid, f"{_name}: страница {i}/{t}, найдено иллюстраций {k}")
+
+        photos = map_document(d["path"], by_page, on_page)
+        ops = [UpdateOne({"id": pid}, {"$set": {"photo": ph}})
+               for pid, ph in photos.items()]
+        for i in range(0, len(ops), 1000):
+            db.products.bulk_write(ops[i:i + 1000], ordered=False)
+        total += len(photos)
+        L(f"{d['name']}: {len(photos)} позиций связано с иллюстрацией")
+        progress(tid, 100.0 * (n + 1) / len(docs), {"photos": total})
+    finish(tid, "done", {"photos": total},
+           f"готово — {total} иллюстраций сопоставлено с матрицами цен")
+
+
+def job_anomalies(tid, payload):
+    """Re-parse geometry and persist every discarded price cell with its reason.
+
+    Deliberately does NOT touch products or embeddings: it only rebuilds the
+    audit trail of what micrograd threw away.
+    """
+    start(tid)
+    L = lambda m: log(tid, m)
+    from assemble import build_products, run_micrograd
+    from pipeline import parse_pdf
+    docs = list(db.documents.find({}, {"_id": 0}))
+    if not docs:
+        finish(tid, "done", {"anomalies": 0}, "нет документов для обработки")
+        return
+    db.anomalies.delete_many({})
+    L(f"журнал аномалий: пересчёт по {len(docs)} документам")
+    total = 0
+    for n, d in enumerate(docs):
+        if not os.path.exists(d.get("path", "")):
+            continue
+        base = 100.0 * n / len(docs)
+        span = 100.0 / len(docs)
+
+        def on_page(i, t, npr, _b=base, _s=span, _name=d["name"]):
+            progress(tid, _b + _s * 0.6 * i / max(t, 1))
+            if i % 150 == 0:
+                log(tid, f"{_name}: геометрия {i}/{t} страниц")
+
+        pages = parse_pdf(d["path"], on_page=on_page)
+        run_micrograd(pages, log=L)
+        _, stats = build_products(pages, {
+            "factory_id": d.get("factory_id"), "factory": d.get("factory"),
+            "doc_id": d["id"], "doc_name": d["name"],
+            "collection": d.get("collection")}, collect_rejected=True)
+
+        recs = []
+        for r in stats.get("rejected_records", []):
+            r = dict(r)
+            r.update({"id": str(uuid.uuid4()), "doc_id": d["id"],
+                      "doc_name": d["name"], "factory": d.get("factory"),
+                      "created_at": now()})
+            recs.append(r)
+        for pg in pages:
+            for hp in pg.get("header_prices", []):
+                recs.append({
+                    "id": str(uuid.uuid4()), "doc_id": d["id"], "doc_name": d["name"],
+                    "factory": d.get("factory"), "page": pg["page"],
+                    "text": hp["text"], "bbox": hp["bbox"], "confidence": 0.0,
+                    "row_peers": 0, "col_peers": 0, "above_text": None,
+                    "left_text": None, "model_name": pg.get("model_name"),
+                    "category": pg.get("section_title"),
+                    "reason": "Колонтитул страницы (верхние/нижние 5%)",
+                    "zone": hp["zone"], "created_at": now()})
+        for i in range(0, len(recs), 1000):
+            db.anomalies.insert_many(recs[i:i + 1000])
+        total += len(recs)
+        L(f"{d['name']}: записано {len(recs)} отсеянных блоков")
+        progress(tid, base + span, {"anomalies": total})
+    finish(tid, "done", {"anomalies": total},
+           f"журнал готов — {total} отсеянных блоков задокументировано")
+
+
+JOBS = {"scan": job_scan, "ingest": job_ingest, "embed": job_embed,
+        "photos": job_photos, "anomalies": job_anomalies}
 
 
 async def consumer():
@@ -302,6 +404,39 @@ async def embed(req: Request):
     return {"task_id": tid}
 
 
+@app.post("/photos")
+async def photos_job(req: Request):
+    body = await req.json() if await req.body() else {}
+    tid = new_task("photos", "Сопоставление иллюстраций товаров")
+    await JOBQ.put((tid, "photos", body))
+    return {"task_id": tid}
+
+
+@app.post("/anomalies")
+async def anomalies_job(req: Request):
+    body = await req.json() if await req.body() else {}
+    tid = new_task("anomalies", "Журнал отсеянных аномалий")
+    await JOBQ.put((tid, "anomalies", body))
+    return {"task_id": tid}
+
+
+@app.get("/photo")
+def photo(product_id: str, dpi: int = 130):
+    from photos import render_crop
+    p = db.products.find_one({"id": product_id}, {"_id": 0, "photo": 1, "doc_id": 1})
+    if not p or not p.get("photo"):
+        return JSONResponse({"error": "no illustration for this product"}, status_code=404)
+    doc = db.documents.find_one({"id": p["doc_id"]})
+    if not doc or not os.path.exists(doc.get("path", "")):
+        return JSONResponse({"error": "document not found"}, status_code=404)
+    try:
+        png = render_crop(doc["path"], p["photo"]["page"], p["photo"]["bbox"], dpi=dpi)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+
 @app.get("/page-image")
 def page_image(doc_id: str, page: int, dpi: int = 120):
     doc = db.documents.find_one({"id": doc_id})
@@ -316,7 +451,7 @@ def page_image(doc_id: str, page: int, dpi: int = 120):
 
 
 def _load_vectors():
-    """Load the vector index, plus a mean-centred copy.
+    """Load the vector index, plus a mean-centred copy and an id->row map.
 
     The distilled multilingual CLIP text encoder is strongly anisotropic: every
     product sentence shares a dominant direction, so raw cosine sits around 0.9
@@ -341,8 +476,39 @@ def _load_vectors():
         M = np.zeros((0, 512), dtype=np.float32)
         mu = np.zeros((512,), dtype=np.float32)
         Mc = M
-    VEC_CACHE.update({"stamp": stamp, "ids": ids, "M": M, "Mc": Mc, "mu": mu})
+    VEC_CACHE.update({"stamp": stamp, "ids": ids, "M": M, "Mc": Mc, "mu": mu,
+                      "pos": {pid: i for i, pid in enumerate(ids)}})
     return VEC_CACHE
+
+
+# cosine bands differ wildly per modality, so the 0..1 match score is calibrated
+CALIBRATION = {"text": (0.30, 0.92), "image": (0.08, 0.38)}
+
+
+def _calibrate(v, mode):
+    lo, hi = CALIBRATION[mode]
+    return float(min(max((v - lo) / (hi - lo), 0.0), 1.0))
+
+
+def _lexical_scores(q, limit=500):
+    """MongoDB text-index half of hybrid search, with RU->EN query translation."""
+    from lexicon import translate_query
+    terms, matched = translate_query(q)
+    if not terms:
+        return {}, terms, matched
+    try:
+        cur = db.products.find(
+            {"$text": {"$search": " ".join(terms)},
+             "confidence": {"$gte": 0.65}, "n_variations": {"$gte": 2}},
+            {"_id": 0, "id": 1, "s": {"$meta": "textScore"}},
+        ).sort([("s", {"$meta": "textScore"})]).limit(limit)
+        raw = [(d["id"], float(d["s"])) for d in cur]
+    except Exception:
+        return {}, terms, matched
+    if not raw:
+        return {}, terms, matched
+    mx = max(s for _, s in raw) or 1.0
+    return {pid: s / mx for pid, s in raw}, terms, matched
 
 
 @app.post("/search")
@@ -378,24 +544,95 @@ async def search(req: Request):
     else:
         sims = M @ qv
 
-    # deep candidate pool, then one row per (model, category) so the grid is not
-    # 24 near-identical columns of the same product family
-    pool = int(min(max(top_k * 40, 400), M.shape[0]))
-    order = np.argsort(-sims)[:pool]
-    picked = [(ids[i], float(sims[i])) for i in order]
+    # ---- hybrid ranking: Reciprocal Rank Fusion of the vector and lexical lists ----
+    # RRF is scale-free, which matters because a mean-centred cosine and a MongoDB
+    # textScore are not comparable numbers. A naive weighted sum let pure keyword
+    # hits with a NEGATIVE cosine outrank genuine semantic matches.
+    pos = C["pos"]
+    pool = int(min(max(top_k * 40, 500), M.shape[0]))
+    order = list(np.argsort(-sims)[:pool])
+    vec_rank = {ids[i]: r for r, i in enumerate(order)}
+    cand = set(vec_rank.keys())
+
+    lex, terms, matched = ({}, [], [])
+    if mode == "text":
+        lex, terms, matched = _lexical_scores(q)
+        cand |= set(lex.keys())
+    lex_rank = {pid: r for r, (pid, _) in
+                enumerate(sorted(lex.items(), key=lambda kv: -kv[1]))}
+
+    K = 60.0
+    scored = []
+    for pid in cand:
+        rrf = 0.0
+        if pid in vec_rank:
+            rrf += 1.0 / (K + vec_rank[pid] + 1)
+        if pid in lex_rank:
+            rrf += 1.0 / (K + lex_rank[pid] + 1)
+        i = pos.get(pid)
+        cos = float(sims[i]) if i is not None else None
+        vec = _calibrate(cos, mode) if cos is not None else 0.0
+        lx = lex.get(pid, 0.0)
+        match = (0.60 * vec + 0.40 * lx) if mode == "text" else vec
+        scored.append((pid, rrf, match, cos, lx))
+    scored.sort(key=lambda x: -x[1])
+
+    head = scored[:max(top_k * 40, 800)]
     pmap = {p["id"]: p for p in db.products.find(
-        {"id": {"$in": [pid for pid, _ in picked]}}, {"_id": 0})}
+        {"id": {"$in": [row[0] for row in head]}}, {"_id": 0})}
+    BAD_CATEGORY = {"", "note", "notes", "features", "surcharges", "attention",
+                    "attention:", "important", "measurements", "general"}
     seen, out = set(), []
-    for pid, s in picked:
+    for pid, rrf, match, cos, lx in head:
         p = pmap.get(pid)
         if not p:
+            continue
+        # search surfaces real price matrices, not stray cells or note blocks
+        if (p.get("n_variations") or 0) < 2:
+            continue
+        cat = str(p.get("category") or "").strip().lower()
+        if cat in BAD_CATEGORY:
             continue
         key = (p.get("model_name"), p.get("category"))
         if key in seen:
             continue
         seen.add(key)
-        p["score"] = s
+        p["score"] = cos if cos is not None else 0.0
+        p["match"] = round(match, 4)
+        p["lex"] = round(lx, 4)
+        p["rrf"] = round(rrf, 5)
         out.append(p)
         if len(out) >= top_k:
             break
-    return {"results": out, "mode": mode, "searched": int(M.shape[0])}
+    # RRF chose *which* rows; display order follows the calibrated match so the
+    # % badges in the UI read monotonically top-to-bottom
+    out.sort(key=lambda p: -p["match"])
+    return {"results": out, "mode": mode, "searched": int(M.shape[0]),
+            "lexical_terms": terms, "translated_from": matched,
+            "lexical_hits": len(lex)}
+
+
+@app.get("/export")
+def export(status: str = "approved", doc_id: str = "", factory: str = "",
+           mode: str = "product"):
+    from export_xlsx import build_workbook
+    q = {}
+    if status and status != "all":
+        q["status"] = status
+    if doc_id:
+        q["doc_id"] = doc_id
+    if factory:
+        q["factory"] = factory
+    prods = list(db.products.find(q, {"_id": 0}).limit(60000))
+    labels = {"approved": "только одобренные", "pending": "ожидают проверки",
+              "rejected": "отклонённые", "all": "все статусы"}
+    data = build_workbook(prods, {
+        "factory": factory or (prods[0].get("factory") if prods else None),
+        "status_label": labels.get(status, status), "mode": mode})
+    n_rows = (sum(len(p.get("variations") or []) for p in prods)
+              if mode == "variation" else len(prods))
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="homeart_catalog.xlsx"',
+                 "X-Rows": str(n_rows), "X-Products": str(len(prods))})

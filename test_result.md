@@ -265,6 +265,67 @@ backend:
         -comment: "✅ TESTED - POST /api/search working correctly for both TEXT and IMAGE modes: TEXT MODE: (1) Russian query 'диван из кожи' returns 8 sofa/pouf results (TURNER, GREGOR, LUCIO, CLEO, AUGUSTO found) with top score=0.7964 (>0.7 ✓). (2) Russian query 'кухонный модуль с ящиками' returns KITCHEN BOX DRAWERS as first result ✓. (3) Russian query 'кровать' returns bed-related rows (BED ACCESSORIES, daybed) ✓. (4) English query 'dining table oak' returns table rows (WOODY, MONK found) ✓. (5) Empty query returns {results:[], mode:'text'} with HTTP 200 (not 500) ✓. (6) De-duplication PASSED: no duplicate (model_name, category) pairs in any query ✓. (7) All required fields present in results: score, price_min, price_max, doc_id, page, model_name, n_variations ✓. (8) Searched count: 16309 (matches embeddings count) ✓. IMAGE MODE: (9) PIL-generated 400x300 JPEG uploaded successfully ✓. (10) Returns mode='image' with 8 results ✓. (11) Scores in expected CLIP image-text band: 0.29-0.30 (within 0.1-0.45 range) ✓. (12) All required fields present: score, doc_id, page ✓. LATENCY: Warm text query latency measured at 0.241s (well under 3s threshold) ✓. SEMANTIC CORRECTNESS: Russian-language queries return semantically correct furniture types ✓. EMBEDDING TEXT BUILDER: Product texts are clean semantic strings with format 'MODEL. category. finishes. Collection, Section' - no price text (EUR/€) and no variant codes found ✓."
 
 
+  - task: "Excel export (Экспорт каталога) /api/export"
+    implemented: true
+    working: true
+    file: "backend/export_xlsx.py, app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "GET /api/export?status=approved&mode=product|variation[&doc_id=..] streams a real .xlsx built by openpyxl in the sidecar. Must return HTTP 200, Content-Type application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, an X-Rows header, and a body starting with the ZIP magic bytes PK. 60 products are currently status=approved. Verify: (a) mode=product and mode=variation both work and variation returns a LARGER file; (b) status=all works; (c) the workbook opens with openpyxl and has sheets ['Каталог','Сводка'], Cyrillic headers on row 4 of 'Каталог' starting with 'Фабрика','Коллекция','Модель','Категория','Габариты','Артикул', and freeze panes set; (d) status=rejected currently yields 0 rows and must still return a valid xlsx, not a 500."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ TESTED - Excel export working correctly: (1) mode=product returns 200, correct Content-Type, X-Rows=60, ZIP magic bytes 'PK', 12,172 bytes. (2) mode=variation returns 200, LARGER file (19,579 bytes vs 12,172), actual data has 203 rows (one per finish) vs 60 product rows (3.38x expansion). (3) status=all returns 200 with 20,499 rows, 1.3MB file. (4) status=rejected returns 200 with 0 rows, valid xlsx (not 500). (5) Workbook structure verified with openpyxl: sheets=['Каталог','Сводка'], row 4 headers=['Фабрика','Коллекция','Модель','Категория','Габариты','Артикул'], freeze panes set at A5, Cyrillic not mojibake. Minor: X-Rows header reports product count (60) instead of actual row count (203) for variation mode, but actual xlsx data is correct."
+
+  - task: "Hybrid RU/EN search (vector + MongoDB text index)"
+    implemented: true
+    working: true
+    file: "backend/lexicon.py, backend/worker.py, backend/db.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "POST /api/search now fuses the vector list with a MongoDB $text list using Reciprocal Rank Fusion (K=60). Russian queries are translated to English domain terms by backend/lexicon.py (stem prefix map) because the catalogue text is English. Response adds lexical_terms, translated_from, lexical_hits, and each result adds match (0..1 calibrated), lex, rrf. Verify: (1) {'q':'обеденный стол'} -> translated_from contains ['обеденный','стол'], lexical_terms contains 'dining' and 'table', and results include table rows (DINE SNACK TABLE / VICINO TABLE / MATEO); (2) {'q':'кровать'} returns bed rows; (3) {'q':'диван из кожи'} still returns sofas; (4) every result has n_variations>=2 and a non-empty category (junk note rows are filtered); (5) results are ordered by DESCENDING `match` so UI badges read monotonically; (6) no duplicate (model_name, category) pairs. Also check lexicon directly: translate_query('обеденный стол') must give ['dining','table'] and NOT 'worktop' (a previous stem bug mapped стол->столешниц)."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ TESTED - Hybrid RU/EN search working correctly: LEXICON UNIT TEST: (1) translate_query('обеденный стол') → ['dining','table'], matched=['обеденный','стол'] ✓ (2) translate_query('кровать') → ['bed'] ✓ (3) translate_query('столешница') → ['worktop','top'] ✓ (4) Stem bug FIXED: 'стол' does NOT map to 'worktop' ✓. SEARCH API: (5) Query 'обеденный стол' returns 200 with translated_from=['обеденный','стол'], lexical_terms=['dining','table'], lexical_hits=500, results include DINE SNACK TABLE, VICINO TABLE, BASE UNITS FOR DINE SNACK TABLE, MATEO oval dining tables, SNACK TABLE ✓. (6) Query 'кровать' returns bed-related rows (ALDGATE Bed, MARTEEN daybed) ✓. (7) Query 'диван из кожи' returns sofa rows (AUGUSTO, GREGOR, LUCIO, CLEO, OCTAVE) - regression passed ✓. (8) All results have n_variations>=2 ✓. (9) All results have non-empty category ✓. (10) Results sorted by DESCENDING match [0.511, 0.464, 0.411, 0.327, 0.260] ✓. (11) No duplicate (model_name, category) pairs ✓. (12) All results have required fields: match, score, lex, price_min, price_max, doc_id, page ✓. (13) Empty query returns {results:[], mode:'text'} with 200 (not 500) ✓. (14) Image mode still works: PIL JPEG upload returns mode='image', 8 results, scores in expected CLIP band [0.279-0.271] ✓."
+
+  - task: "Product illustration crops (/api/product-photo) + mapping job"
+    implemented: true
+    working: true
+    file: "backend/photos.py, backend/worker.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "page.get_images() is useless on these PDFs (all embedded rasters are <60pt logos; the furniture drawings are VECTOR art), so photos.py rasterises vector-path coverage onto a 4pt occupancy grid and takes the contiguous covered band directly ABOVE each price matrix. The mapping job already ran: 14,356 of 20,499 products have a `photo` field. Verify: (a) GET /api/product-photo?product_id=<id of a product that HAS photo> returns HTTP 200 image/png with PNG magic bytes and >1KB; (b) a product_id with no photo returns a 4xx, not a crash; (c) products in /api/products expose the photo object with page and bbox for those that have one. DO NOT re-run POST /api/photos unless needed (it takes ~2 minutes)."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ TESTED - Product illustration crops working correctly: (1) Found product with photo field: id=38692b45-9f69-4211-80fe-37e7d1fbd8de, photo={page:369, bbox:[96,412,556,616]}. (2) GET /api/product-photo?product_id=<valid_id> returns 200, Content-Type='image/png', PNG magic bytes (\\x89PNG) verified, size=19,346 bytes (>1KB) ✓. (3) GET /api/product-photo?product_id=doesnotexist returns 404 (4xx error, not 500 crash) ✓. (4) MongoDB count: 14,356 products have photo field (matches expected ~14,356) ✓. (5) Products in /api/products expose photo object with page and bbox fields ✓."
+
+  - task: "Anomaly review lane (/api/anomalies) + scan job"
+    implemented: true
+    working: true
+    file: "backend/worker.py, backend/assemble.py, app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "The scan job already ran and persisted 23,042 discarded blocks into the `anomalies` collection. GET /api/anomalies supports doc_id, reason, zone, q, limit (max 400), skip and returns {items,total,skip,limit,reasons:[{reason,n}]}. Verify: (a) total is ~23042; (b) reasons contains the 6 Russian categories including 'Колонтитул страницы (верхние/нижние 5%)' and 'Нет заголовка столбца сверху'; (c) filtering by one reason returns only that reason and the count matches the facet; (d) each item exposes text, confidence, row_peers, col_peers, above_text, left_text, reason, doc_name, page; (e) pagination via skip works and no item leaks a Mongo _id; (f) default sort is confidence DESCENDING. DO NOT call POST /api/anomaly-scan (it re-parses 2,186 pages, ~3 minutes) unless everything else passes and you want to confirm it enqueues - if you do call it, just assert it returns a task_id and do not wait for completion."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ TESTED - Anomaly review lane working correctly: (1) GET /api/anomalies?limit=5 returns 200 with total=23,042 (matches expected ~23,042) ✓. (2) Reasons facets: 6 categories found including 'Колонтитул страницы (верхние/нижние 5%)' and 'Нет заголовка столбца сверху' ✓. (3) Default sort is confidence DESCENDING: [0.9984, 0.9984, 0.9975, 0.9963, 0.9947] ✓. (4) All required fields present in items: text, confidence, row_peers, col_peers, above_text, left_text, reason, doc_name, page ✓. (5) No Mongo _id field exposed ✓. (6) Filter by reason: queried first reason 'Нет заголовка столбца сверху' (expected 13,325 items), returned total=13,325, all items have correct reason ✓. (7) Pagination: skip=0 and skip=5 return different first items ✓. (8) Text search (q parameter): searched for '483', found 12 matching items ✓."
+
+
 frontend:
   - task: "Login screen, shell, Ingest, Task Monitor, QA split-screen"
     implemented: true
@@ -286,8 +347,10 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Slice 2: Spotlight vector search (/api/search) text + image"
-    - "Slice 2: dual CLIP embedding job (/api/embed)"
+    - "Excel export (Экспорт каталога) /api/export"
+    - "Hybrid RU/EN search (vector + MongoDB text index)"
+    - "Anomaly review lane (/api/anomalies) + scan job"
+    - "Product illustration crops (/api/product-photo) + mapping job"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -408,3 +471,50 @@ agent_communication:
       SUMMARY: Both Slice 2 endpoints (/api/embed and /api/search) are working correctly.
       NO CRITICAL ISSUES FOUND. Vector search is production-ready.
 
+
+    -agent: "testing"
+    -message: |
+      ✅ SLICE 3 BACKEND TESTING COMPLETE - 20/21 TESTS PASSED (95%)
+      
+      Tested the FOUR new Slice 3 backend features as requested. All features are working correctly.
+      
+      TEST RESULTS:
+      
+      A) Excel export (GET /api/export) - 4/5 tests passed ✅
+         • mode=product: 200, correct Content-Type, X-Rows=60, ZIP magic bytes, 12,172 bytes ✓
+         • mode=variation: 200, LARGER file (19,579 bytes vs 12,172), actual data has 203 rows (one per finish) vs 60 product rows (3.38x expansion) ✓
+         • status=all: 200, 20,499 rows, 1.3MB file ✓
+         • status=rejected: 200, 0 rows, valid xlsx (not 500) ✓
+         • Workbook structure: sheets=['Каталог','Сводка'], row 4 headers correct, freeze panes at A5, Cyrillic not mojibake ✓
+         • Minor issue: X-Rows header reports product count (60) instead of actual row count (203) for variation mode, but actual xlsx data is correct
+      
+      B) Hybrid RU/EN search (POST /api/search) - 6/6 tests passed ✅
+         • Lexicon unit test: translate_query('обеденный стол') → ['dining','table'] (NOT 'worktop') ✓
+         • Query 'обеденный стол': returns table results (DINE SNACK TABLE, VICINO TABLE, MATEO), translated_from=['обеденный','стол'], lexical_terms=['dining','table'], lexical_hits=500 ✓
+         • Query 'кровать': returns bed results (ALDGATE Bed, MARTEEN daybed) ✓
+         • Query 'диван из кожи': returns sofa results (AUGUSTO, GREGOR, LUCIO, CLEO, OCTAVE) - regression passed ✓
+         • All results have n_variations>=2, non-empty category, sorted by DESCENDING match, no duplicates ✓
+         • Empty query: returns {results:[], mode:'text'} with 200 (not 500) ✓
+         • Image mode: PIL JPEG upload returns mode='image', 8 results, scores in CLIP band [0.279-0.271] ✓
+      
+      C) Anomaly review lane (GET /api/anomalies) - 4/4 tests passed ✅
+         • Basic query: total=23,042 (matches expected), 6 reason categories including 'Колонтитул страницы (верхние/нижние 5%)' and 'Нет заголовка столбца сверху' ✓
+         • Default sort: confidence DESCENDING [0.9984, 0.9984, 0.9975, 0.9963, 0.9947] ✓
+         • All required fields present: text, confidence, row_peers, col_peers, above_text, left_text, reason, doc_name, page (no _id) ✓
+         • Filter by reason: returns 13,325 items, all with correct reason ✓
+         • Pagination: skip=0 and skip=5 return different items ✓
+         • Text search: q='483' returns 12 matching items ✓
+      
+      D) Product illustration crops (GET /api/product-photo) - 3/3 tests passed ✅
+         • Valid product_id: returns 200, Content-Type='image/png', PNG magic bytes, 19,346 bytes ✓
+         • Invalid product_id: returns 404 (4xx error, not 500 crash) ✓
+         • MongoDB count: 14,356 products have photo field (matches expected ~14,356) ✓
+      
+      E) Regression smoke tests - 3/3 tests passed ✅
+         • GET /api/stats: products=20499, approved=60, embeddings=16309, documents=5 ✓
+         • GET /api/products: returns 3 items with filters ✓
+         • GET /api/tasks: includes expected task types (ingest, embed, photos, anomalies) ✓
+      
+      SUMMARY: All 4 new Slice 3 features are working correctly. The only minor issue is the X-Rows header calculation for variation mode, which reports product count instead of actual row count, but the actual xlsx data is correct.
+      
+      NO CRITICAL ISSUES FOUND. All backend APIs are working as expected.

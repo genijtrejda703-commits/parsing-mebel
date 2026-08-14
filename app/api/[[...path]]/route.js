@@ -192,6 +192,73 @@ async function handler(request, ctx) {
       return ok(fresh || {})
     }
 
+    if (route === '/photos' && method === 'POST') {
+      return ok(await worker('/photos', { method: 'POST', body: '{}' }))
+    }
+    if (route === '/anomaly-scan' && method === 'POST') {
+      return ok(await worker('/anomalies', { method: 'POST', body: '{}' }))
+    }
+
+    // ---------------- anomaly review lane ----------------
+    if (route === '/anomalies' && method === 'GET') {
+      const q = {}
+      if (qp.get('doc_id')) q.doc_id = qp.get('doc_id')
+      if (qp.get('reason')) q.reason = qp.get('reason')
+      if (qp.get('zone')) q.zone = qp.get('zone')
+      const term = (qp.get('q') || '').trim()
+      if (term) {
+        const rx = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+        q.$or = [{ text: rx }, { model_name: rx }, { category: rx },
+          { above_text: rx }, { left_text: rx }]
+      }
+      const limit = Math.min(parseInt(qp.get('limit') || '100'), 400)
+      const skip = parseInt(qp.get('skip') || '0')
+      const A = db.collection('anomalies')
+      const [items, total, reasons] = await Promise.all([
+        A.find(q, { projection: { _id: 0 } })
+          .sort({ confidence: -1, page: 1 }).skip(skip).limit(limit).toArray(),
+        A.countDocuments(q),
+        A.aggregate([{ $group: { _id: '$reason', n: { $sum: 1 } } },
+          { $sort: { n: -1 } }]).toArray(),
+      ])
+      return ok({
+        items, total, skip, limit,
+        reasons: reasons.map(r => ({ reason: r._id, n: r.n })),
+      })
+    }
+
+    // ---------------- excel export ----------------
+    if (route === '/export' && method === 'GET') {
+      const p = new URLSearchParams({
+        status: qp.get('status') || 'approved',
+        mode: qp.get('mode') || 'product',
+      })
+      if (qp.get('doc_id')) p.set('doc_id', qp.get('doc_id'))
+      if (qp.get('factory')) p.set('factory', qp.get('factory'))
+      const res = await fetch(`${WORKER}/export?${p}`)
+      if (!res.ok) return bad(`export failed: ${await res.text()}`, res.status)
+      const buf = await res.arrayBuffer()
+      const stamp = new Date().toISOString().slice(0, 10)
+      const name = `HOMEART_catalog_${qp.get('status') || 'approved'}_${stamp}.xlsx`
+      return new Response(buf, {
+        headers: {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'Content-Disposition': `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+          'X-Rows': res.headers.get('X-Rows') || '0',
+        },
+      })
+    }
+
+    // ---------------- product illustration crop ----------------
+    if (route === '/product-photo' && method === 'GET') {
+      const res = await fetch(`${WORKER}/photo?product_id=${qp.get('product_id')}&dpi=${qp.get('dpi') || 130}`)
+      if (!res.ok) return bad('no illustration', res.status)
+      const buf = await res.arrayBuffer()
+      return new Response(buf, {
+        headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=604800' },
+      })
+    }
+
     // ---------------- page raster (proxied from PyMuPDF) ----------------
     if (route === '/page-image' && method === 'GET') {
       const res = await fetch(`${WORKER}/page-image?doc_id=${qp.get('doc_id')}&page=${qp.get('page')}&dpi=${qp.get('dpi') || 120}`)

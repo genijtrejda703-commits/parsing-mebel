@@ -7,7 +7,7 @@ min-max price range.
 import uuid
 from datetime import datetime, timezone
 
-from anomaly import MicrogradAnomalyModel, featurize, weak_label
+from anomaly import MicrogradAnomalyModel, NUM_RE, featurize, weak_label
 from pipeline import describe_column
 
 ACCEPT_CONF = 0.45
@@ -49,11 +49,26 @@ def _bbox_union(boxes):
     return [round(xs0, 2), round(ys0, 2), round(xs1, 2), round(ys1, 2)]
 
 
-def build_products(pages, doc_meta):
+def rejection_reason(cand):
+    """Human-readable Russian explanation for why a price cell was discarded."""
+    above = cand.get("above")
+    if (cand.get("row_peers") or 0) <= 1:
+        return "Изолированная ячейка — нет соседей в строке"
+    if not cand.get("left"):
+        return "Нет подписи строки слева"
+    if not above:
+        return "Нет заголовка столбца сверху"
+    if NUM_RE.match(str(above.get("text", "")).strip()):
+        return "Заголовок столбца — тоже число (признак оглавления)"
+    return "Ниже порога уверенности micrograd"
+
+
+def build_products(pages, doc_meta, collect_rejected=False):
     """Assemble products + return (products, stats)."""
     products = []
     rejected = 0
     anomaly_samples = []
+    rejected_records = []
     for pg in pages:
         category = pg.get("section_title") or pg.get("running_header")
         section = pg["side_labels"][0] if pg.get("side_labels") else None
@@ -93,6 +108,28 @@ def build_products(pages, doc_meta):
                             "reason": "low micrograd score (isolated / no column header)",
                             "row_peers": variations[0]["row_peers"],
                         })
+                    if collect_rejected:
+                        for c in cells:
+                            if c.get("value") is None:
+                                continue
+                            above = c.get("above")
+                            left = c.get("left")
+                            rejected_records.append({
+                                "page": pg["page"],
+                                "text": c["text"],
+                                "value": c.get("value"),
+                                "bbox": [c["x0"], c["y0"], c["x1"], c["y1"]],
+                                "confidence": round(float(c.get("confidence", 0.5)), 4),
+                                "margin": c.get("margin"),
+                                "row_peers": c.get("row_peers", 0),
+                                "col_peers": c.get("col_peers", 0),
+                                "above_text": (above or {}).get("text"),
+                                "left_text": (left or {}).get("text"),
+                                "model_name": pg.get("model_name"),
+                                "category": category,
+                                "reason": rejection_reason(c),
+                                "zone": "matrix",
+                            })
                     continue
                 prices = [v["price"] for v in variations]
                 header_boxes = [[b["x0"], b["y0"], b["x1"], b["y1"]] for b in chain]
@@ -128,7 +165,8 @@ def build_products(pages, doc_meta):
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 })
     stats = {"products": len(products), "rejected_cells": rejected,
-             "anomaly_samples": anomaly_samples}
+             "anomaly_samples": anomaly_samples,
+             "rejected_records": rejected_records}
     return products, stats
 
 

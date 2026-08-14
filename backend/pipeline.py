@@ -359,6 +359,10 @@ def parse_pdf(path, max_pages=None, on_page=None):
             "model_name": model, "running_header": running, "section_title": section,
             "side_labels": [s["text"] for s in side][:6],
             "n_blocks": len(body), "n_headers": len(headers),
+            "header_prices": [{"text": b["text"],
+                               "bbox": [b["x0"], b["y0"], b["x1"], b["y1"]],
+                               "zone": "header" if b["y0"] < 0.05 * H else "footer"}
+                              for b in headers if PRICE_RE.match(b["text"])],
             "prices": prices, "tables": tables,
         })
         if on_page and (pno % 10 == 0 or pno == total - 1):

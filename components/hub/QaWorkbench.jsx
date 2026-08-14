@@ -16,7 +16,7 @@ import {
 } from '@/components/ui/select'
 import {
   Check, X, Loader2, Search, Crosshair, Maximize2, ZoomIn, ZoomOut, FileText,
-  ShieldAlert, Save, ChevronUp, ChevronDown, Sparkles,
+  ShieldAlert, Save, ChevronUp, ChevronDown, Sparkles, FileSpreadsheet,
 } from 'lucide-react'
 
 const money = (v) => v == null ? '—' : new Intl.NumberFormat('ru-RU').format(v)
@@ -226,6 +226,16 @@ const QaWorkbench = ({ seedTerm = '' }) => {
         <Badge variant="outline" className="text-[10px] border-border">
           {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : `${items.length} / ${money(total)}`}
         </Badge>
+
+        <Button size="sm" variant="secondary" className="h-8 text-[11px]"
+          onClick={() => {
+            const p = new URLSearchParams({ status: 'approved', mode: 'product' })
+            if (docId !== 'all') p.set('doc_id', docId)
+            window.open(`/api/export?${p}`, '_blank')
+          }}
+          title="Выгрузить одобренные позиции в Excel">
+          <FileSpreadsheet className="h-3.5 w-3.5 mr-1.5" /> Экспорт .xlsx
+        </Button>
       </div>
 
       <ResizablePanelGroup direction="horizontal" className="flex-1">

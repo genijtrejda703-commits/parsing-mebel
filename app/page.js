@@ -8,8 +8,10 @@ import IngestPanel from '@/components/hub/IngestPanel'
 import TaskMonitor from '@/components/hub/TaskMonitor'
 import QaWorkbench from '@/components/hub/QaWorkbench'
 import SpotlightSearch from '@/components/hub/SpotlightSearch'
+import ExportPanel from '@/components/hub/ExportPanel'
+import AnomalyLane from '@/components/hub/AnomalyLane'
 import {
-  Boxes, DownloadCloud, FolderInput, LayoutGrid, LogOut, Radar, Activity,
+  Boxes, DownloadCloud, FolderInput, LayoutGrid, LogOut, Radar, Activity, ShieldAlert,
 } from 'lucide-react'
 
 const NAV = [
@@ -17,7 +19,8 @@ const NAV = [
   { id: 'monitor', label: 'Очередь задач', icon: Activity, ready: true },
   { id: 'catalog', label: 'Контроль качества', icon: LayoutGrid, ready: true },
   { id: 'spotlight', label: 'Умный поиск', icon: Radar, ready: true },
-  { id: 'export', label: 'Экспорт каталога', icon: DownloadCloud, ready: false },
+  { id: 'anomalies', label: 'Журнал аномалий', icon: ShieldAlert, ready: true },
+  { id: 'export', label: 'Экспорт каталога', icon: DownloadCloud, ready: true },
 ]
 
 const TITLES = {
@@ -25,6 +28,8 @@ const TITLES = {
   monitor: 'Очередь задач конвейера',
   catalog: 'Контроль качества',
   spotlight: 'Умный поиск по каталогу',
+  anomalies: 'Журнал отсеянных аномалий',
+  export: 'Экспорт каталога',
 }
 
 const App = () => {
@@ -157,6 +162,8 @@ const App = () => {
             }}
           />
         )}
+        {view === 'anomalies' && <AnomalyLane />}
+        {view === 'export' && <ExportPanel stats={stats} />}
       </main>
     </div>
   )

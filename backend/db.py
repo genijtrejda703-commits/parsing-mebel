@@ -31,6 +31,7 @@ documents = db["documents"]
 tasks = db["tasks"]
 products = db["products"]
 embeddings_col = db["product_embeddings"]
+anomalies = db["anomalies"]
 
 
 def ensure_indexes():
@@ -40,9 +41,24 @@ def ensure_indexes():
         products.create_index("status")
         products.create_index([("model_name", 1)])
         products.create_index("page")
+        products.create_index("confidence")
         tasks.create_index("created_at")
         documents.create_index("id", unique=True)
         embeddings_col.create_index("product_id")
+        anomalies.create_index("doc_id")
+        anomalies.create_index("confidence")
+        anomalies.create_index("reason")
+    except Exception:
+        pass
+    try:
+        # lexical half of hybrid search
+        products.create_index(
+            [("model_name", "text"), ("category", "text"), ("collection", "text"),
+             ("section", "text"), ("doc_name", "text"), ("variations.finish", "text")],
+            name="prod_text",
+            weights={"model_name": 6, "category": 5, "variations.finish": 2,
+                     "section": 2, "doc_name": 3, "collection": 1},
+            default_language="english")
     except Exception:
         pass
 

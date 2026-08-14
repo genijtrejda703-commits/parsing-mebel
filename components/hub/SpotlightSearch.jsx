@@ -19,11 +19,15 @@ const EXAMPLES = [
 
 // CLIP text-text similarity lives in a much higher band than image-text similarity,
 // so the badge is calibrated per query mode instead of showing a raw cosine.
+// The backend now returns a pre-calibrated hybrid `match`; this stays as a fallback.
 const matchPct = (score, mode) => {
   const lo = mode === 'image' ? 0.08 : 0.30
   const hi = mode === 'image' ? 0.38 : 0.92
   return Math.max(1, Math.min(99, Math.round(((score - lo) / (hi - lo)) * 100)))
 }
+const pctOf = (p, mode) =>
+  p?.match != null ? Math.max(1, Math.min(99, Math.round(p.match * 100)))
+    : matchPct(p?.score ?? 0, mode)
 
 const SpotlightSearch = ({ stats, onOpenInQa }) => {
   const [q, setQ] = useState('')
@@ -230,6 +234,12 @@ const SpotlightSearch = ({ stats, onOpenInQa }) => {
               <span className="text-xs text-muted-foreground">
                 просканировано векторов: {money(res.searched || 0)} · найдено {results.length}
               </span>
+              {!!(res.translated_from || []).length && (
+                <Badge variant="outline" className="text-[10px] border-emerald-500/40 text-emerald-400">
+                  гибридный поиск: {res.translated_from.join(', ')} →{' '}
+                  {(res.lexical_terms || []).slice(0, 6).join(', ')} ({res.lexical_hits} совп.)
+                </Badge>
+              )}
             </div>
 
             {!results.length && (
@@ -244,20 +254,25 @@ const SpotlightSearch = ({ stats, onOpenInQa }) => {
               {results.map(p => (
                 <Card key={p.id}
                   className="overflow-hidden bg-card/70 border-border hover:border-primary/40 transition-colors group">
-                  <div className="relative h-[132px] bg-[#0b0a09] overflow-hidden">
+                  <div className="relative h-[140px] bg-white overflow-hidden">
                     <img
-                      src={`/api/page-image?doc_id=${p.doc_id}&page=${p.page}&dpi=45`}
+                      src={p.photo
+                        ? `/api/product-photo?product_id=${p.id}&dpi=130`
+                        : `/api/page-image?doc_id=${p.doc_id}&page=${p.page}&dpi=45`}
                       alt="" loading="lazy"
-                      className="w-full h-full object-cover object-top opacity-80 group-hover:opacity-100 transition-opacity" />
+                      className={p.photo
+                        ? 'w-full h-full object-contain p-1.5'
+                        : 'w-full h-full object-cover object-top opacity-80'} />
                     <div className="absolute top-2 right-2">
                       <div className="rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground tabular-nums shadow-lg">
-                        {matchPct(p.score, resMode)}% совпадение
+                        {pctOf(p, resMode)}% совпадение
                       </div>
                     </div>
                     <div className="absolute bottom-2 left-2">
                       <Badge variant="outline"
-                        className="text-[9px] bg-background/80 border-border backdrop-blur">
+                        className="text-[9px] bg-background/85 border-border backdrop-blur">
                         стр. {p.page + 1} · cos {p.score?.toFixed(3)}
+                        {p.lex > 0 ? ` · lex ${p.lex.toFixed(2)}` : ''}
                       </Badge>
                     </div>
                   </div>
