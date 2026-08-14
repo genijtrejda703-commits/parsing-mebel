@@ -8,7 +8,7 @@ import time
 from PIL import Image
 import requests
 
-BASE_URL = os.getenv("NEXT_PUBLIC_BASE_URL", "https://saas-ingestion.preview.emergentagent.com")
+BASE_URL = os.getenv("NEXT_PUBLIC_BASE_URL", "https://quality-control-32.preview.emergentagent.com")
 API_URL = f"{BASE_URL}/api"
 PASSWORD = "homeart2025"
 

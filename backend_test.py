@@ -16,7 +16,7 @@ import requests
 from PIL import Image
 
 # Backend URL from environment
-BASE_URL = os.environ.get("NEXT_PUBLIC_BASE_URL", "https://saas-ingestion.preview.emergentagent.com")
+BASE_URL = os.environ.get("NEXT_PUBLIC_BASE_URL", "https://quality-control-32.preview.emergentagent.com")
 API_BASE = f"{BASE_URL}/api"
 
 # Test configuration
