@@ -175,6 +175,80 @@ async function handler(request, ctx) {
     }
 
     // ---------------- pipeline control (proxy to DS sidecar) ----------------
+    // ---------------- Приёмка (Directive 3: поячеечная сверка) ----------------
+    if (route === '/acceptance/sample' && method === 'POST') {
+      const body = await request.json().catch(() => ({}))
+      const perDoc = Math.min(Math.max(parseInt(body.per_doc || 2), 1), 6)
+      const cpp = Math.min(Math.max(parseInt(body.cells_per_page || 16), 4), 40)
+      const VP = db.collection('variant_prices')
+      const docs = await db.collection('documents')
+        .find({ variant_prices: { $gt: 0 } }, { projection: { _id: 0, id: 1, name: 1 } }).toArray()
+      const sample = []
+      for (const d of docs) {
+        const pages = await VP.aggregate([
+          { $match: { doc_id: d.id } },
+          { $group: { _id: '$page', n: { $sum: 1 } } },
+          { $match: { n: { $gte: 3 } } },
+          { $sample: { size: perDoc } },
+        ]).toArray()
+        for (const pg of pages) {
+          const cells = await VP.aggregate([
+            { $match: { doc_id: d.id, page: pg._id } },
+            { $sample: { size: cpp } },
+          ]).toArray()
+          for (const c of cells) {
+            sample.push({
+              id: c.id, doc_id: d.id, doc_name: d.name, page: c.page,
+              page_width: c.page_width, page_height: c.page_height,
+              position_id: c.position_id, position_name: c.position_name,
+              variant_code: c.variant_code, dimension: c.dimension, finish: c.finish,
+              price: c.price, bbox: c.bbox, bbox_row_label: c.bbox_row_label,
+              bbox_col_header: c.bbox_col_header,
+              verdict: null, note: '', sampled_at: new Date().toISOString(),
+            })
+          }
+        }
+      }
+      await db.collection('acceptance_cells').deleteMany({})
+      if (sample.length) await db.collection('acceptance_cells').insertMany(sample)
+      return ok({ sampled: sample.length, documents: docs.length, per_doc: perDoc })
+    }
+
+    if (route === '/acceptance' && method === 'GET') {
+      const cells = await db.collection('acceptance_cells')
+        .find({}, { projection: { _id: 0 } }).sort({ doc_name: 1, page: 1 }).toArray()
+      const total = cells.length
+      const checked = cells.filter(c => c.verdict).length
+      const errors = cells.filter(c => c.verdict && c.verdict !== 'ok').length
+      const byVerdict = {}
+      const perDoc = {}
+      const pages = {}
+      for (const c of cells) {
+        if (c.verdict) byVerdict[c.verdict] = (byVerdict[c.verdict] || 0) + 1
+        const dk = c.doc_name || '—'
+        perDoc[dk] = perDoc[dk] || { total: 0, checked: 0, errors: 0 }
+        perDoc[dk].total++
+        if (c.verdict) perDoc[dk].checked++
+        if (c.verdict && c.verdict !== 'ok') perDoc[dk].errors++
+        const pk = `${c.doc_id}__${c.page}`
+        if (!pages[pk]) pages[pk] = { doc_id: c.doc_id, doc_name: c.doc_name, page: c.page, page_width: c.page_width, page_height: c.page_height, cells: [] }
+        pages[pk].cells.push(c)
+      }
+      return ok({
+        cells, pages: Object.values(pages),
+        stats: { total, checked, errors, error_rate: checked ? errors / checked : 0, by_verdict: byVerdict, per_doc: perDoc },
+      })
+    }
+
+    if (segs[0] === 'acceptance' && segs[1] && segs[1] !== 'sample' && (method === 'PATCH' || method === 'PUT')) {
+      const body = await request.json()
+      const $set = {}
+      if ('verdict' in body) $set.verdict = body.verdict
+      if ('note' in body) $set.note = body.note
+      await db.collection('acceptance_cells').updateOne({ id: segs[1] }, { $set })
+      return ok({ ok: true })
+    }
+
     // ---------------- inventory + coverage (Directive 2) ----------------
     if (route === '/inventory' && method === 'POST') {
       const body = await request.json().catch(() => ({}))

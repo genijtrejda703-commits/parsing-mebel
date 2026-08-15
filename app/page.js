@@ -13,9 +13,10 @@ import ExportPanel from '@/components/hub/ExportPanel'
 import AnomalyLane from '@/components/hub/AnomalyLane'
 import InventoryPanel from '@/components/hub/InventoryPanel'
 import CoveragePanel from '@/components/hub/CoveragePanel'
+import AcceptancePanel from '@/components/hub/AcceptancePanel'
 import {
   Boxes, DownloadCloud, FolderInput, LayoutGrid, LogOut, Radar, Activity, ShieldAlert,
-  FolderTree, PieChart,
+  FolderTree, PieChart, ClipboardCheck,
 } from 'lucide-react'
 
 const NAV = [
@@ -24,6 +25,7 @@ const NAV = [
   { id: 'inventory', label: 'Инвентаризация файлов', icon: FolderTree, ready: true },
   { id: 'coverage', label: 'Покрытие', icon: PieChart, ready: true },
   { id: 'catalog', label: 'Контроль качества', icon: LayoutGrid, ready: true },
+  { id: 'acceptance', label: 'Приёмка', icon: ClipboardCheck, ready: true },
   { id: 'spotlight', label: 'Умный поиск', icon: Radar, ready: true },
   { id: 'anomalies', label: 'Журнал аномалий', icon: ShieldAlert, ready: true },
   { id: 'export', label: 'Экспорт каталога', icon: DownloadCloud, ready: true },
@@ -35,6 +37,7 @@ const TITLES = {
   inventory: 'Инвентаризация файлов фабрики',
   coverage: 'Покрытие разбора',
   catalog: 'Контроль качества',
+  acceptance: 'Приёмка — поячеечная сверка',
   spotlight: 'Умный поиск по каталогу',
   anomalies: 'Журнал отсеянных аномалий',
   export: 'Экспорт каталога',
@@ -165,6 +168,7 @@ const App = () => {
           <InventoryPanel onTaskStart={(id) => { setActiveTask(id); setView('monitor') }} />
         )}
         {view === 'coverage' && <CoveragePanel />}
+        {view === 'acceptance' && <AcceptancePanel />}
         {view === 'spotlight' && (
           <SpotlightSearch
             stats={stats}
